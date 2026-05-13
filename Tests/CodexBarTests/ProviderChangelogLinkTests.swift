@@ -6,7 +6,7 @@ import Testing
 @MainActor
 struct ProviderChangelogLinkTests {
     @Test
-    func `known CLI providers declare changelog URLs`() throws {
+    func `known CLI providers declare changelog URLs`() {
         let metadata = ProviderDefaults.metadata
 
         #expect(metadata[.codex]?.changelogURL == "https://github.com/openai/codex/releases")
@@ -15,11 +15,13 @@ struct ProviderChangelogLinkTests {
     }
 
     @Test
-    func `provider menu shows changelog action only when URL is known`() throws {
+    func `provider menu shows changelog action only when URL is known`() {
         let codexDescriptor = self.makeDescriptor(provider: .codex, suite: "ProviderChangelogLinkTests-codex")
         #expect(self.actionTitles(from: codexDescriptor).contains("Changelog"))
 
-        let openRouterDescriptor = self.makeDescriptor(provider: .openrouter, suite: "ProviderChangelogLinkTests-openrouter")
+        let openRouterDescriptor = self.makeDescriptor(
+            provider: .openrouter,
+            suite: "ProviderChangelogLinkTests-openrouter")
         #expect(!self.actionTitles(from: openRouterDescriptor).contains("Changelog"))
     }
 
@@ -46,7 +48,7 @@ struct ProviderChangelogLinkTests {
             settings: settings,
             account: fetcher.loadAccountInfo(),
             updateReady: false,
-            includeContextualActions: false)
+            includeContextualActions: true)
     }
 
     private func actionTitles(from descriptor: MenuDescriptor) -> [String] {
