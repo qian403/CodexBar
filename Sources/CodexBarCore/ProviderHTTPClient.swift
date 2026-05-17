@@ -11,6 +11,16 @@ public protocol ProviderHTTPTransport: Sendable {
 extension URLSession: ProviderHTTPTransport {}
 #endif
 
+extension URLSession {
+    public func response(for request: URLRequest) async throws -> ProviderHTTPResponse {
+        let (data, response) = try await self.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw URLError(.badServerResponse)
+        }
+        return ProviderHTTPResponse(data: data, response: httpResponse)
+    }
+}
+
 public struct ProviderHTTPResponse: Sendable {
     public let data: Data
     public let response: HTTPURLResponse
