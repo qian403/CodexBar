@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.28.1 — Unreleased
+## 0.29.0 — 2026-05-22
 
 ### Added
 - Cost history: show Codex standard and fast spend/token splits in model breakdowns (#1070). Thanks @iam-brain!
