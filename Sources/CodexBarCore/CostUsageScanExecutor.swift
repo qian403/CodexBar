@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 /// Cost-usage scans read and parse the full local session corpus synchronously and can run for
 /// minutes on large archives. Executing that work inline on Swift's cooperative thread pool
@@ -12,6 +11,90 @@ public enum CostUsageScanExecutor {
 
     private static let queue = DispatchQueue(label: queueLabel, qos: .utility)
 
+    private final class RunState<Value: Sendable>: @unchecked Sendable {
+        private enum Phase {
+            case initial
+            case queued
+            case running
+            case completed
+        }
+
+        private let lock = NSLock()
+        private var phase: Phase = .initial
+        private var cancellationRequested = false
+        private var continuation: CheckedContinuation<Value, Error>?
+
+        func install(_ continuation: CheckedContinuation<Value, Error>) -> Bool {
+            let shouldEnqueue: Bool
+            let shouldResumeCancellation: Bool
+            self.lock.lock()
+            if self.cancellationRequested {
+                self.phase = .completed
+                shouldEnqueue = false
+                shouldResumeCancellation = true
+            } else {
+                self.phase = .queued
+                self.continuation = continuation
+                shouldEnqueue = true
+                shouldResumeCancellation = false
+            }
+            self.lock.unlock()
+
+            if shouldResumeCancellation {
+                continuation.resume(throwing: CancellationError())
+            }
+            return shouldEnqueue
+        }
+
+        func begin() -> Bool {
+            self.lock.lock()
+            defer { self.lock.unlock() }
+            guard self.phase == .queued else { return false }
+            self.phase = .running
+            return true
+        }
+
+        func cancel() {
+            let continuation: CheckedContinuation<Value, Error>?
+            self.lock.lock()
+            self.cancellationRequested = true
+            if self.phase == .queued {
+                self.phase = .completed
+                continuation = self.continuation
+                self.continuation = nil
+            } else {
+                continuation = nil
+            }
+            self.lock.unlock()
+            continuation?.resume(throwing: CancellationError())
+        }
+
+        func checkCancellation() throws {
+            self.lock.lock()
+            let cancellationRequested = self.cancellationRequested
+            self.lock.unlock()
+            if cancellationRequested {
+                throw CancellationError()
+            }
+        }
+
+        func complete(with result: Result<Value, Error>) {
+            let continuation: CheckedContinuation<Value, Error>?
+            let resolvedResult: Result<Value, Error>
+            self.lock.lock()
+            guard self.phase == .running else {
+                self.lock.unlock()
+                return
+            }
+            self.phase = .completed
+            continuation = self.continuation
+            self.continuation = nil
+            resolvedResult = self.cancellationRequested ? .failure(CancellationError()) : result
+            self.lock.unlock()
+            continuation?.resume(with: resolvedResult)
+        }
+    }
+
     /// Runs `work` on the serial scan queue and bridges Swift task cancellation into the
     /// scanner's cooperative `checkCancellation` callbacks. Work that is still queued when the
     /// awaiting task is cancelled resumes immediately with `CancellationError` instead of
@@ -20,24 +103,20 @@ public enum CostUsageScanExecutor {
         _ work: @escaping @Sendable (_ checkCancellation: @escaping @Sendable () throws -> Void) throws -> T)
         async throws -> T
     {
-        let cancelled = OSAllocatedUnfairLock(initialState: false)
+        let state = RunState<T>()
         let checkCancellation: @Sendable () throws -> Void = {
-            if cancelled.withLock({ $0 }) {
-                throw CancellationError()
-            }
+            try state.checkCancellation()
         }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
+                guard state.install(continuation) else { return }
                 self.queue.async {
-                    if cancelled.withLock({ $0 }) {
-                        continuation.resume(throwing: CancellationError())
-                        return
-                    }
-                    continuation.resume(with: Result { try work(checkCancellation) })
+                    guard state.begin() else { return }
+                    state.complete(with: Result { try work(checkCancellation) })
                 }
             }
         } onCancel: {
-            cancelled.withLock { $0 = true }
+            state.cancel()
         }
     }
 }

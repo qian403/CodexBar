@@ -1,5 +1,4 @@
 import Foundation
-import os
 import Testing
 @testable import CodexBarCore
 
@@ -24,40 +23,38 @@ struct CostUsageScanExecutorTests {
 
     @Test
     func `serializes overlapping scans`() async throws {
-        let state = OSAllocatedUnfairLock(initialState: (active: 0, maxActive: 0))
+        let state = LockedValue((active: 0, maxActive: 0))
         try await withThrowingTaskGroup(of: Void.self) { group in
             for _ in 0..<4 {
                 group.addTask {
                     try await CostUsageScanExecutor.run { _ in
-                        state.withLock {
+                        state.update {
                             $0.active += 1
                             $0.maxActive = max($0.maxActive, $0.active)
                         }
-                        usleep(20000)
-                        state.withLock { $0.active -= 1 }
+                        Thread.sleep(forTimeInterval: 0.02)
+                        state.update { $0.active -= 1 }
                     }
                 }
             }
             try await group.waitForAll()
         }
-        #expect(state.withLock { $0.maxActive } == 1)
+        #expect(state.read { $0.maxActive } == 1)
     }
 
     @Test
     func `cancellation reaches in-flight work through checkCancellation`() async {
-        let workStarted = OSAllocatedUnfairLock(initialState: false)
+        let workStarted = LockedValue(false)
         let task = Task {
             try await CostUsageScanExecutor.run { checkCancellation in
-                workStarted.withLock { $0 = true }
+                workStarted.set(true)
                 while true {
                     try checkCancellation()
-                    usleep(5000)
+                    Thread.sleep(forTimeInterval: 0.005)
                 }
             }
         }
-        while !workStarted.withLock({ $0 }) {
-            usleep(1000)
-        }
+        #expect(await self.waitUntil { workStarted.value })
         task.cancel()
         await #expect(throws: CancellationError.self) {
             try await task.value
@@ -66,31 +63,85 @@ struct CostUsageScanExecutorTests {
 
     @Test
     func `work cancelled while queued resumes with CancellationError`() async {
-        let blockerStarted = OSAllocatedUnfairLock(initialState: false)
-        let releaseBlocker = OSAllocatedUnfairLock(initialState: false)
+        let blockerStarted = LockedValue(false)
+        let releaseBlocker = LockedValue(false)
         let blocker = Task {
             try await CostUsageScanExecutor.run { _ in
-                blockerStarted.withLock { $0 = true }
-                while !releaseBlocker.withLock({ $0 }) {
-                    usleep(2000)
+                blockerStarted.set(true)
+                while !releaseBlocker.value {
+                    Thread.sleep(forTimeInterval: 0.002)
                 }
             }
         }
-        while !blockerStarted.withLock({ $0 }) {
-            usleep(1000)
-        }
+        #expect(await self.waitUntil { blockerStarted.value })
 
+        let queuedWorkStarted = LockedValue(false)
         let queued = Task {
             try await CostUsageScanExecutor.run { _ in
+                queuedWorkStarted.set(true)
                 Issue.record("queued work should not run after cancellation")
             }
         }
-        queued.cancel()
-        releaseBlocker.withLock { $0 = true }
+        try? await Task.sleep(for: .milliseconds(50))
 
-        await #expect(throws: CancellationError.self) {
-            try await queued.value
+        let cancellationObserved = LockedValue<Bool?>(nil)
+        let observer = Task {
+            do {
+                try await queued.value
+                cancellationObserved.set(false)
+            } catch is CancellationError {
+                cancellationObserved.set(true)
+            } catch {
+                cancellationObserved.set(false)
+            }
         }
+        queued.cancel()
+
+        #expect(await self.waitUntil { cancellationObserved.value != nil })
+        #expect(cancellationObserved.value == true)
+        #expect(!queuedWorkStarted.value)
+        #expect(!releaseBlocker.value)
+
+        releaseBlocker.set(true)
+        await observer.value
         _ = try? await blocker.value
+    }
+
+    private func waitUntil(
+        timeout: Duration = .seconds(1),
+        condition: @escaping @Sendable () -> Bool) async -> Bool
+    {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return condition()
+    }
+}
+
+private final class LockedValue<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Value
+
+    init(_ value: Value) {
+        self.storage = value
+    }
+
+    var value: Value {
+        self.lock.withLock { self.storage }
+    }
+
+    func read<Result>(_ body: (Value) -> Result) -> Result {
+        self.lock.withLock { body(self.storage) }
+    }
+
+    func set(_ value: Value) {
+        self.lock.withLock { self.storage = value }
+    }
+
+    func update(_ body: (inout Value) -> Void) {
+        self.lock.withLock { body(&self.storage) }
     }
 }
