@@ -16,6 +16,7 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case gemini
     case antigravity
     case copilot
+    case devin
     case zai
     case minimax
     case manus
@@ -70,6 +71,7 @@ public enum IconStyle: String, Sendable, CaseIterable {
     case alibaba
     case factory
     case copilot
+    case devin
     case kimi
     case kimik2
     case kilo
@@ -227,6 +229,16 @@ public enum ProviderBrowserCookieDefaults {
     public static var mimoCookieImportOrder: BrowserCookieImportOrder? {
         #if os(macOS)
         [.safari, .chrome, .chromeBeta, .chromeCanary, .firefox, .edge]
+        #else
+        nil
+        #endif
+    }
+
+    /// Devin sessions are normally in Chrome. Keep automatic import narrow so live probes do not
+    /// touch unrelated browser keychains; users can select another browser explicitly.
+    public static var devinCookieImportOrder: BrowserCookieImportOrder? {
+        #if os(macOS)
+        [.chrome]
         #else
         nil
         #endif
