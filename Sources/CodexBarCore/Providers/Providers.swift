@@ -52,6 +52,7 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case groq
     case llmproxy
     case deepgram
+    case custom
 }
 
 // swiftformat:enable sortDeclarations
@@ -104,6 +105,7 @@ public enum IconStyle: String, Sendable, CaseIterable {
     case groq
     case llmproxy
     case deepgram
+    case custom
     case combined
 }
 

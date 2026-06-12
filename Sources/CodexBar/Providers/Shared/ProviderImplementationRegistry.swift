@@ -62,6 +62,7 @@ enum ProviderImplementationRegistry {
         case .groq: GroqProviderImplementation()
         case .llmproxy: LLMProxyProviderImplementation()
         case .deepgram: DeepgramProviderImplementation()
+        case .custom: CustomProviderImplementation()
         }
     }
 

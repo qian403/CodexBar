@@ -102,6 +102,7 @@ public enum ProviderDescriptorRegistry {
         .groq: GroqProviderDescriptor.descriptor,
         .llmproxy: LLMProxyProviderDescriptor.descriptor,
         .deepgram: DeepgramProviderDescriptor.descriptor,
+        .custom: CustomProviderDescriptor.descriptor,
     ]
     private static let bootstrap: Void = {
         for provider in UsageProvider.allCases {

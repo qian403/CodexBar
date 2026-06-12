@@ -105,6 +105,16 @@ public enum ProviderTokenResolver {
         self.llmProxyResolution(environment: environment)?.token
     }
 
+    public static func customToken(environment: [String: String] = ProcessInfo.processInfo.environment) -> String? {
+        self.customResolution(environment: environment)?.token
+    }
+
+    public static func customResolution(
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> ProviderTokenResolution?
+    {
+        self.resolveEnv(CustomSettingsReader.apiKey(environment: environment))
+    }
+
     public static func perplexitySessionToken(
         environment: [String: String] = ProcessInfo.processInfo.environment) -> String?
     {
