@@ -2,6 +2,7 @@ import SwiftUI
 
 struct HiddenWindowView: View {
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         Color.clear
@@ -9,6 +10,11 @@ struct HiddenWindowView: View {
             .onReceive(NotificationCenter.default.publisher(for: .codexbarOpenSettings)) { _ in
                 Task { @MainActor in
                     self.openSettings()
+                }
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .codexbarOpenUsageWindow)) { _ in
+                Task { @MainActor in
+                    self.openWindow(id: UsageDashboardWindow.id)
                 }
             }
             .task {

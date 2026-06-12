@@ -136,6 +136,9 @@ struct MenuContent: View {
             }
         case .settings:
             self.actions.openSettings()
+        case .usageWindow:
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .codexbarOpenUsageWindow, object: nil)
         case .about:
             self.actions.openAbout()
         case .quit:

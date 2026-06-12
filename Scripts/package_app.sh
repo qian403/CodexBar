@@ -371,6 +371,11 @@ install_widget_extension
 if [[ -d ".build/$CONF/Sparkle.framework" ]]; then
   cp -R ".build/$CONF/Sparkle.framework" "$APP/Contents/Frameworks/"
   chmod -R a+rX "$APP/Contents/Frameworks/Sparkle.framework"
+  # Strip extended attributes / AppleDouble detritus that `cp -R` can carry over,
+  # otherwise codesign rejects nested bundles (e.g. Updater.app) with
+  # "resource fork, Finder information, or similar detritus not allowed".
+  xattr -cr "$APP/Contents/Frameworks/Sparkle.framework"
+  find "$APP/Contents/Frameworks/Sparkle.framework" -name '._*' -delete
   install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CodexBar"
   # Re-sign Sparkle and all nested components with Developer ID + timestamp
   SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"

@@ -39,6 +39,7 @@ struct MenuDescriptor {
         case openTerminal = "terminal"
         case loginToProvider = "arrow.right.square"
         case settings = "gearshape"
+        case usageWindow = "square.grid.3x3.fill"
         case about = "info.circle"
         case quit = "xmark.rectangle"
         case copyError = "doc.on.doc"
@@ -64,6 +65,7 @@ struct MenuDescriptor {
         case openTerminal(command: String)
         case loginToProvider(url: String)
         case settings
+        case usageWindow
         case about
         case quit
         case copyError(String)
@@ -582,6 +584,7 @@ struct MenuDescriptor {
         }
         entries.append(contentsOf: [
             .action(L("Refresh"), .refresh),
+            .action(L("Usage Heatmap…"), .usageWindow),
             .action(L("Settings..."), .settings),
             .action(L("About CodexBar"), .about),
             .action(L("Quit"), .quit),
@@ -694,6 +697,7 @@ extension MenuDescriptor.MenuAction {
         switch self {
         case .installUpdate, .settings, .about, .quit:
             nil
+        case .usageWindow: MenuDescriptor.MenuActionSystemImage.usageWindow.rawValue
         case .refresh: MenuDescriptor.MenuActionSystemImage.refresh.rawValue
         case .refreshAugmentSession: MenuDescriptor.MenuActionSystemImage.refresh.rawValue
         case .dashboard: MenuDescriptor.MenuActionSystemImage.dashboard.rawValue

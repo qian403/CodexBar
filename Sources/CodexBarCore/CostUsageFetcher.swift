@@ -102,7 +102,9 @@ public struct CostUsageFetcher: Sendable {
         piScannerOptions overridePiScannerOptions: PiSessionCostScanner
             .Options? = nil) async throws -> CostUsageTokenSnapshot
     {
-        guard provider == .codex || provider == .claude || provider == .vertexai || provider == .bedrock else {
+        guard provider == .codex || provider == .claude || provider == .vertexai
+            || provider == .bedrock || provider == .opencode
+        else {
             throw CostUsageError.unsupportedProvider(provider)
         }
 
@@ -116,6 +118,15 @@ public struct CostUsageFetcher: Sendable {
                 environment: environment,
                 since: since,
                 until: until)
+            return Self.tokenSnapshot(from: daily, now: now, historyDays: clampedHistoryDays)
+        }
+
+        if provider == .opencode {
+            let daily = OpenCodeCostUsageReader.loadDailyReport(
+                since: since,
+                until: until,
+                now: now,
+                environment: environment)
             return Self.tokenSnapshot(from: daily, now: now, historyDays: clampedHistoryDays)
         }
 

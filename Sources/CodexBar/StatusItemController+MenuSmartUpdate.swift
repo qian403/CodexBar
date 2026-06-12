@@ -20,6 +20,12 @@ extension StatusItemController {
         _ menu: NSMenu,
         context: MenuUpdateContext)
     {
+        // Switching to a shorter tab shrinks the menu; AppKit then re-drops the whole popup
+        // toward the status item (a tall tab is shifted up to fit the screen, a short one is
+        // not), so the menu visibly slides down. Capture the top edge before mutating and
+        // re-pin it afterward so the top stays put across tab switches.
+        let anchoredTop = self.capturedMenuWindowTop(menu)
+        defer { self.reanchorMenuWindowTop(menu, to: anchoredTop) }
         self.performMenuMutationWithoutAnimation {
             let contentStartIndex = self.providerSwitcherContentStartIndex(in: menu)
             if let switcherView = menu.items.first?.view as? ProviderSwitcherView {
@@ -93,6 +99,44 @@ extension StatusItemController {
                 menuWidth: context.menuWidth,
                 contentVersion: self.menuContentVersion)
         }
+    }
+
+    private struct MenuWindowTopAnchor {
+        let window: NSWindow
+        let top: CGFloat
+    }
+
+    /// Records the open menu window's top edge so it can be restored after an in-place
+    /// content swap changes the menu height. Returns nil when the menu has no live window
+    /// (e.g. the menu is not currently being tracked on screen).
+    private func capturedMenuWindowTop(_ menu: NSMenu) -> MenuWindowTopAnchor? {
+        guard let window = menu.items.first?.view?.window else { return nil }
+        return MenuWindowTopAnchor(window: window, top: window.frame.maxY)
+    }
+
+    /// Re-pins the menu window so its top edge matches the pre-mutation position. AppKit may
+    /// relayout the menu either synchronously or on the next runloop tick, so correct both
+    /// now and once more asynchronously; the async pass is a no-op when already aligned.
+    private func reanchorMenuWindowTop(_ menu: NSMenu, to anchor: MenuWindowTopAnchor?) {
+        guard let anchor else { return }
+        self.applyMenuWindowTopCorrection(anchor)
+        DispatchQueue.main.async { [weak self] in
+            self?.applyMenuWindowTopCorrection(anchor)
+        }
+    }
+
+    private func applyMenuWindowTopCorrection(_ anchor: MenuWindowTopAnchor) {
+        let window = anchor.window
+        guard window.isVisible else { return }
+        let frame = window.frame
+        // Only correct a downward slide of the top edge; never lift the menu above its anchor.
+        guard frame.maxY < anchor.top - 0.5 else { return }
+        var origin = frame.origin
+        origin.y = anchor.top - frame.height
+        if let screen = window.screen {
+            origin.y = min(origin.y, screen.visibleFrame.maxY - frame.height)
+        }
+        window.setFrameOrigin(origin)
     }
 
     /// Adds everything below the provider switcher (account switchers, card content, and

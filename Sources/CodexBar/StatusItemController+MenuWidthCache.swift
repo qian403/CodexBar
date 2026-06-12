@@ -130,6 +130,8 @@ extension StatusItemController {
             "loginToProvider:\(url)"
         case .settings:
             "settings"
+        case .usageWindow:
+            "usageWindow"
         case .about:
             "about"
         case .quit:

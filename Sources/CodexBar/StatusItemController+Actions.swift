@@ -270,6 +270,13 @@ extension StatusItemController: StatusItemMenuPersistentActionDelegate {
         self.openSettings(tab: .about)
     }
 
+    @objc func showUsageWindow() {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            NotificationCenter.default.post(name: .codexbarOpenUsageWindow, object: nil)
+        }
+    }
+
     func openMenuFromShortcut() {
         if self.closeOpenMenusFromShortcutIfNeeded() {
             return

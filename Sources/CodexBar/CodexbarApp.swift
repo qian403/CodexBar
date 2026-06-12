@@ -98,6 +98,12 @@ struct CodexBarApp: App {
         }
         .defaultSize(width: PreferencesTab.general.preferredWidth, height: PreferencesTab.general.preferredHeight)
         .windowResizability(.contentSize)
+
+        Window(L("Usage Heatmap"), id: UsageDashboardWindow.id) {
+            UsageDashboardView(store: self.store, settings: self.settings)
+        }
+        .defaultSize(width: 900, height: 600)
+        .windowResizability(.contentMinSize)
     }
 
     private func openSettings(tab: PreferencesTab) {

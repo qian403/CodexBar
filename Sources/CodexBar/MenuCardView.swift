@@ -951,7 +951,7 @@ extension UsageMenuCardView.Model {
         return ""
     }
 
-    private static func plan(
+    static func plan(
         for provider: UsageProvider,
         snapshot: UsageSnapshot?,
         account: AccountInfo,

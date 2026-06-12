@@ -9,6 +9,9 @@ xcuserdata/
 .build/
 DerivedData
 
+# Superpowers brainstorm/visual-companion working files
+.superpowers/
+
 # Bundles / artifacts
 # Main app bundle (any variation)
 CodexBar.app/

@@ -37,6 +37,9 @@ extension StatusItemController {
         case .settings:
             self.closeMenuForPersistentAction(menu)
             self.showSettingsGeneral()
+        case .usageWindow:
+            self.closeMenuForPersistentAction(menu)
+            self.showUsageWindow()
         case .about:
             self.closeMenuForPersistentAction(menu)
             self.showSettingsAbout()

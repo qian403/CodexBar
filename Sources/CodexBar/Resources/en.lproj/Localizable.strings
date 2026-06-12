@@ -1071,3 +1071,28 @@
 "language_vietnamese" = "Vietnamese";
 
 "Request quota: %@ / %@" = "Request quota: %@ / %@";
+
+/* Usage Heatmap dashboard */
+"Tokens" = "Tokens";
+"Less" = "Less";
+"More" = "More";
+"3 days" = "3 days";
+"All time" = "All time";
+"Usage Heatmap" = "Usage Heatmap";
+"Usage Heatmap…" = "Usage Heatmap…";
+"Usage heatmap" = "Usage heatmap";
+"Usage limits" = "Usage limits";
+"No usage history yet for this provider." = "No usage history yet for this provider.";
+"No usage history yet." = "No usage history yet.";
+"Enable a provider with token-cost tracking (Codex, Claude, …) to see a heatmap." = "Enable a provider with token-cost tracking (Codex, Claude, …) to see a heatmap.";
+"Past year · %@ · %d active days" = "Past year · %@ · %d active days";
+"%d active days in the last year" = "%d active days in the last year";
+"%@ · model breakdown" = "%@ · model breakdown";
+
+"Spend" = "Spend";
+"No daily token usage to chart for this provider." = "No daily token usage to chart for this provider.";
+
+"Cache hit" = "Cache hit";
+"Cache write" = "Cache write";
+"Hover a day to see usage." = "Hover a day to see usage.";
+"%@ cache hit" = "%@ cache hit";

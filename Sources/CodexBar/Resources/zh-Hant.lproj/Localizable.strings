@@ -939,3 +939,38 @@
 "language_vietnamese" = "越南語";
 
 "Request quota: %@ / %@" = "請求額度：%@ / %@";
+
+/* Usage Heatmap dashboard */
+"Tokens" = "Tokens";
+"Less" = "少";
+"More" = "多";
+"3 days" = "3 天";
+"This month" = "本月";
+"All time" = "全部期間";
+"Usage Heatmap" = "用量熱力圖";
+"Usage Heatmap…" = "用量熱力圖…";
+"Usage heatmap" = "用量熱力圖";
+"Usage limits" = "用量上限";
+"No usage history yet for this provider." = "這個服務商目前還沒有用量紀錄。";
+"No usage history yet." = "目前還沒有用量紀錄。";
+"Enable a provider with token-cost tracking (Codex, Claude, …) to see a heatmap." = "啟用具備 token 費用追蹤的服務商（Codex、Claude…）即可看到熱力圖。";
+"Past year · %@ · %d active days" = "過去一年 · %@ · %d 個活躍日";
+"%d active days in the last year" = "過去一年有 %d 個活躍日";
+"%@ · model breakdown" = "%@ · 模型明細";
+
+/* Reset/usage strings (zh-Hant parity) */
+"Resets in %@" = "%@後重置";
+"Resets %@" = "於 %@ 重置";
+"Resets now" = "立即重置";
+"Updated %@" = "更新於 %@";
+"Updated just now" = "剛剛更新";
+"usage_percent_suffix_used" = "已使用";
+"usage_percent_suffix_left" = "剩餘";
+
+"Spend" = "花費";
+"No daily token usage to chart for this provider." = "此服務商沒有可繪製的每日 token 用量。";
+
+"Cache hit" = "快取命中";
+"Cache write" = "快取寫入";
+"Hover a day to see usage." = "將滑鼠移到某天可查看用量。";
+"%@ cache hit" = "%@ 快取命中";
