@@ -974,3 +974,13 @@
 "Cache write" = "快取寫入";
 "Hover a day to see usage." = "將滑鼠移到某天可查看用量。";
 "%@ cache hit" = "%@ 快取命中";
+
+"3 months" = "3 個月";
+"1 year" = "一年";
+
+"Cost trend" = "費用趨勢";
+"Token trend" = "Token 趨勢";
+"Projected this month: %@" = "本月預估：%@";
+"Export as CSV" = "匯出為 CSV";
+"Export as JSON" = "匯出為 JSON";
+"Export usage" = "匯出用量";

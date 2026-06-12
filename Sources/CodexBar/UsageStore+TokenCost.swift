@@ -10,6 +10,36 @@ extension UsageStore {
         self.tokenErrors[provider]
     }
 
+    /// Providers whose daily token history is produced by scanning local logs/DBs and can
+    /// therefore be re-scanned for an arbitrary window (used by the dashboard to fill a full
+    /// year regardless of the menu's `costUsageHistoryDays` setting).
+    private static let extendedHistoryProviders: Set<UsageProvider> = [.codex, .claude, .vertexai, .opencode]
+
+    /// Loads up to `days` of daily token entries for the dashboard. Local-scan providers are
+    /// re-scanned for the wider window; everything else falls back to the cached snapshot.
+    func dashboardDailyEntries(
+        for provider: UsageProvider,
+        days: Int) async -> [CostUsageDailyReport.Entry]
+    {
+        guard Self.extendedHistoryProviders.contains(provider) else {
+            return self.tokenSnapshot(for: provider)?.daily ?? []
+        }
+        let scope = self.tokenCostScope(for: provider)
+        do {
+            let snapshot = try await self.costUsageFetcher.loadTokenSnapshot(
+                provider: provider,
+                environment: self.environmentBase,
+                now: Date(),
+                forceRefresh: false,
+                allowVertexClaudeFallback: !self.isEnabled(.claude),
+                codexHomePath: scope.codexHomePath,
+                historyDays: max(1, min(365, days)))
+            return snapshot.daily
+        } catch {
+            return self.tokenSnapshot(for: provider)?.daily ?? []
+        }
+    }
+
     func tokenLastAttemptAt(for provider: UsageProvider) -> Date? {
         self.lastTokenFetchAt[provider]
     }

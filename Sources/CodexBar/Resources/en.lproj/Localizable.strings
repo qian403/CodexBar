@@ -1096,3 +1096,13 @@
 "Cache write" = "Cache write";
 "Hover a day to see usage." = "Hover a day to see usage.";
 "%@ cache hit" = "%@ cache hit";
+
+"3 months" = "3 months";
+"1 year" = "1 year";
+
+"Cost trend" = "Cost trend";
+"Token trend" = "Token trend";
+"Projected this month: %@" = "Projected this month: %@";
+"Export as CSV" = "Export as CSV";
+"Export as JSON" = "Export as JSON";
+"Export usage" = "Export usage";

@@ -1,5 +1,8 @@
+import AppKit
+import Charts
 import CodexBarCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum UsageDashboardWindow {
     static let id = "usageWindow"
@@ -12,15 +15,38 @@ enum DashboardSelection: Hashable {
     case provider(UsageProvider)
 }
 
+/// How wide a window the heatmap renders. Data is always fetched for a full year;
+/// this only controls how many week-columns are drawn.
+enum HeatmapRange: String, CaseIterable, Hashable {
+    case threeMonths
+    case year
+
+    var weeks: Int {
+        switch self {
+        case .threeMonths: 13
+        case .year: 53
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .threeMonths: L("3 months")
+        case .year: L("1 year")
+        }
+    }
+}
+
 @MainActor
 struct UsageDashboardView: View {
     @Bindable var store: UsageStore
     @Bindable var settings: SettingsStore
 
     @State private var selection: DashboardSelection = .overview
+    @State private var range: HeatmapRange = .year
     @State private var selectedDayKey: String?
     @State private var hoveredCell: HeatmapCell?
     @State private var cachedHeatmap: UsageHeatmapData = .make(daily: [])
+    @State private var extendedDaily: [UsageProvider: [CostUsageDailyReport.Entry]] = [:]
 
     var body: some View {
         HStack(spacing: 0) {
@@ -36,7 +62,9 @@ struct UsageDashboardView: View {
             self.selectedDayKey = nil
             self.refreshHeatmap()
         }
+        .onChange(of: self.range) { _, _ in self.refreshHeatmap() }
         .onChange(of: self.dailySignature) { _, _ in self.refreshHeatmap() }
+        .task(id: self.selection) { await self.loadExtendedForSelection() }
     }
 
     // MARK: Sidebar
@@ -138,6 +166,7 @@ struct UsageDashboardView: View {
                         self.heatmapSection
                         self.statsSection
                         self.metricsRow
+                        self.trendSection
                         self.modelsSection
                         self.daySection
                     } else {
@@ -176,6 +205,26 @@ struct UsageDashboardView: View {
                 }
             }
             Spacer()
+            if hasToken {
+                Picker("", selection: self.$range) {
+                    ForEach(HeatmapRange.allCases, id: \.self) { range in
+                        Text(range.title).tag(range)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .fixedSize()
+
+                Menu {
+                    Button(L("Export as CSV")) { self.export(asJSON: false) }
+                    Button(L("Export as JSON")) { self.export(asJSON: true) }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help(L("Export usage"))
+            }
             Button {
                 NotificationCenter.default.post(name: .codexbarOpenSettings, object: nil)
             } label: {
@@ -556,7 +605,12 @@ struct UsageDashboardView: View {
             .frame(height: 7)
         }
     }
+}
 
+// MARK: - Aggregation, trend, export & helpers
+
+@MainActor
+extension UsageDashboardView {
     // MARK: Aggregation
 
     private struct AggregateTotals {
@@ -591,6 +645,107 @@ struct UsageDashboardView: View {
             .sorted { $0.tokens > $1.tokens }
             .prefix(limit)
             .map(\.self)
+    }
+
+    // MARK: Trend & forecast
+
+    private struct TrendPoint: Identifiable {
+        let date: Date
+        let value: Double
+        var id: TimeInterval {
+            self.date.timeIntervalSince1970
+        }
+    }
+
+    /// Whether the trend plots cost (when any spend is recorded) or falls back to tokens.
+    private var trendUsesCost: Bool {
+        self.cachedHeatmap.stats(within: .allTime).costUSD > 0
+    }
+
+    private var trendPoints: [TrendPoint] {
+        self.cachedHeatmap.days
+            .sorted { $0.date < $1.date }
+            .map { TrendPoint(date: $0.date, value: self.trendUsesCost ? $0.costUSD : Double($0.tokens)) }
+    }
+
+    @ViewBuilder
+    private var trendSection: some View {
+        let points = self.trendPoints
+        if points.count >= 2 {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(self.trendUsesCost ? L("Cost trend") : L("Token trend"))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if let forecast = self.monthForecastText {
+                        Text(forecast)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Chart(points) { point in
+                    AreaMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Value", point.value))
+                        .foregroundStyle(self.selectionColor.opacity(0.15))
+                    LineMark(
+                        x: .value("Date", point.date, unit: .day),
+                        y: .value("Value", point.value))
+                        .foregroundStyle(self.selectionColor)
+                        .interpolationMethod(.monotone)
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading) { value in
+                        AxisGridLine().foregroundStyle(Color.primary.opacity(0.05))
+                        AxisValueLabel {
+                            if let number = value.as(Double.self) {
+                                Text(self.trendAxisLabel(number))
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
+                    }
+                }
+                .chartXAxis {
+                    AxisMarks(values: .stride(by: .month)) { _ in
+                        AxisGridLine().foregroundStyle(Color.clear)
+                        AxisValueLabel(format: .dateTime.month(.abbreviated))
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                .frame(height: 110)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08)))
+        }
+    }
+
+    private func trendAxisLabel(_ value: Double) -> String {
+        if self.trendUsesCost {
+            return self.costString(value)
+        }
+        return UsageFormatter.tokenCountString(Int(value))
+    }
+
+    /// Projects this month's total from the month-to-date pace, when cost data exists.
+    private var monthForecastText: String? {
+        guard self.trendUsesCost else { return nil }
+        let monthCost = self.cachedHeatmap.stats(within: .thisMonth).costUSD
+        guard monthCost > 0 else { return nil }
+        let calendar = Calendar.current
+        let now = Date()
+        let dayOfMonth = calendar.component(.day, from: now)
+        guard dayOfMonth > 0,
+              let daysInMonth = calendar.range(of: .day, in: .month, for: now)?.count
+        else { return nil }
+        let projected = monthCost / Double(dayOfMonth) * Double(daysInMonth)
+        return String(format: L("Projected this month: %@"), self.costString(projected))
     }
 
     // MARK: Day detail
@@ -725,9 +880,35 @@ struct UsageDashboardView: View {
         case .overview:
             self.mergedOverviewDaily()
         case let .provider(provider):
-            self.store.tokenSnapshot(for: provider)?.daily ?? []
+            self.providerDaily(provider)
         }
-        self.cachedHeatmap = .make(daily: daily)
+        self.cachedHeatmap = .make(daily: daily, weeks: self.range.weeks)
+    }
+
+    /// Daily entries for a provider, preferring the dashboard's full-year fetch and
+    /// falling back to the menu's shorter cached snapshot until it arrives.
+    private func providerDaily(_ provider: UsageProvider) -> [CostUsageDailyReport.Entry] {
+        self.extendedDaily[provider] ?? self.store.tokenSnapshot(for: provider)?.daily ?? []
+    }
+
+    /// Fetches a full year of daily entries for the current selection (every contributing
+    /// provider for the overview), then rebuilds the heatmap. The 30-day snapshot keeps the
+    /// grid populated until the wider scan completes.
+    private func loadExtendedForSelection() async {
+        let providers: [UsageProvider] = switch self.selection {
+        case .overview:
+            self.dashboardProviders.filter { self.store.tokenSnapshot(for: $0)?.daily.isEmpty == false }
+        case let .provider(provider):
+            [provider]
+        }
+        for provider in providers where self.extendedDaily[provider] == nil {
+            let entries = await self.store.dashboardDailyEntries(for: provider, days: 365)
+            if Task.isCancelled { return }
+            if !entries.isEmpty {
+                self.extendedDaily[provider] = entries
+            }
+        }
+        self.refreshHeatmap()
     }
 
     /// Sum every provider's daily token usage into one synthetic series so the
@@ -738,17 +919,22 @@ struct UsageDashboardView: View {
             var tokens = 0
             var cost = 0.0
             var requests = 0
+            var cacheRead = 0
+            var cacheWrite = 0
             var models: [String: (cost: Double, tokens: Int, requests: Int)] = [:]
         }
         var byDate: [String: DayAcc] = [:]
 
         for provider in self.dashboardProviders {
-            guard let daily = self.store.tokenSnapshot(for: provider)?.daily else { continue }
+            let daily = self.providerDaily(provider)
+            guard !daily.isEmpty else { continue }
             for entry in daily {
                 var acc = byDate[entry.date] ?? DayAcc()
                 acc.tokens += entry.totalTokens ?? 0
                 acc.cost += entry.costUSD ?? 0
                 acc.requests += entry.requestCount ?? 0
+                acc.cacheRead += entry.cacheReadTokens ?? 0
+                acc.cacheWrite += entry.cacheCreationTokens ?? 0
                 for breakdown in entry.modelBreakdowns ?? [] {
                     var model = acc.models[breakdown.modelName] ?? (0, 0, 0)
                     model.cost += breakdown.costUSD ?? 0
@@ -765,6 +951,8 @@ struct UsageDashboardView: View {
                 date: date,
                 inputTokens: nil,
                 outputTokens: nil,
+                cacheReadTokens: acc.cacheRead > 0 ? acc.cacheRead : nil,
+                cacheCreationTokens: acc.cacheWrite > 0 ? acc.cacheWrite : nil,
                 totalTokens: acc.tokens,
                 requestCount: acc.requests,
                 costUSD: acc.cost,
@@ -857,5 +1045,74 @@ struct UsageDashboardView: View {
 
     private func fullDateString(_ date: Date) -> String {
         date.formatted(.dateTime.year().month(.abbreviated).day().weekday(.abbreviated))
+    }
+
+    // MARK: Export
+
+    private func export(asJSON: Bool) {
+        let days = self.cachedHeatmap.days.sorted { $0.date < $1.date }
+        guard !days.isEmpty else { return }
+        let content = asJSON ? self.exportJSON(days: days) : self.exportCSV(days: days)
+        guard let data = content.data(using: .utf8) else { return }
+
+        let scopeSlug = self.selectionTitle
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "codexbar-usage-\(scopeSlug).\(asJSON ? "json" : "csv")"
+        panel.allowedContentTypes = [asJSON ? .json : .commaSeparatedText]
+        panel.isExtensionHidden = false
+        if panel.runModal() == .OK, let url = panel.url {
+            try? data.write(to: url)
+        }
+    }
+
+    private func exportCSV(days: [HeatmapDay]) -> String {
+        var lines = ["date,tokens,cost_usd,requests,cache_read,cache_write"]
+        for day in days {
+            lines.append([
+                day.dayKey,
+                String(day.tokens),
+                String(format: "%.4f", day.costUSD),
+                String(day.entry.requestCount ?? 0),
+                String(day.entry.cacheReadTokens ?? 0),
+                String(day.entry.cacheCreationTokens ?? 0),
+            ].joined(separator: ","))
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func exportJSON(days: [HeatmapDay]) -> String {
+        let dayObjects: [[String: Any]] = days.map { day in
+            var object: [String: Any] = [
+                "date": day.dayKey,
+                "tokens": day.tokens,
+                "costUSD": day.costUSD,
+            ]
+            if let requests = day.entry.requestCount { object["requests"] = requests }
+            if let cacheRead = day.entry.cacheReadTokens { object["cacheRead"] = cacheRead }
+            if let cacheWrite = day.entry.cacheCreationTokens { object["cacheWrite"] = cacheWrite }
+            if let breakdowns = day.entry.modelBreakdowns, !breakdowns.isEmpty {
+                object["models"] = breakdowns.map { breakdown -> [String: Any] in
+                    var model: [String: Any] = ["name": breakdown.modelName]
+                    if let tokens = breakdown.totalTokens { model["tokens"] = tokens }
+                    if let cost = breakdown.costUSD { model["costUSD"] = cost }
+                    return model
+                }
+            }
+            return object
+        }
+        let root: [String: Any] = [
+            "scope": self.selectionTitle,
+            "range": self.range.rawValue,
+            "currency": self.currencyCode(),
+            "days": dayObjects,
+        ]
+        guard let data = try? JSONSerialization.data(
+            withJSONObject: root,
+            options: [.prettyPrinted, .sortedKeys]),
+            let string = String(data: data, encoding: .utf8)
+        else { return "{}" }
+        return string
     }
 }

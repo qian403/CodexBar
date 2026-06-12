@@ -98,8 +98,10 @@ struct UsageHeatmapData {
     static func make(
         daily: [CostUsageDailyReport.Entry],
         reference: Date = Date(),
-        calendar: Calendar = .current) -> UsageHeatmapData
+        calendar: Calendar = .current,
+        weeks: Int = weekColumns) -> UsageHeatmapData
     {
+        let weekColumns = max(1, min(53, weeks))
         var cal = calendar
         cal.timeZone = calendar.timeZone
 
@@ -135,12 +137,12 @@ struct UsageHeatmapData {
         let currentWeekStart = Self.startOfWeek(for: today, calendar: cal)
 
         var columns: [[HeatmapCell]] = []
-        columns.reserveCapacity(Self.weekColumns)
+        columns.reserveCapacity(weekColumns)
         var monthLabels: [(column: Int, label: String)] = []
         var lastMonth = -1
 
-        for index in 0..<Self.weekColumns {
-            let columnsFromEnd = Self.weekColumns - 1 - index
+        for index in 0..<weekColumns {
+            let columnsFromEnd = weekColumns - 1 - index
             guard let weekStart = cal.date(
                 byAdding: .weekOfYear,
                 value: -columnsFromEnd,
