@@ -233,6 +233,9 @@ public enum ProviderConfigEnvironment {
         if let baseURL = config?.sanitizedEnterpriseHost {
             env[CustomSettingsReader.baseURLEnvironmentKey(for: provider)] = baseURL
         }
+        if let userID = config?.region?.trimmingCharacters(in: .whitespacesAndNewlines), !userID.isEmpty {
+            env[CustomSettingsReader.userIDEnvironmentKey(for: provider)] = userID
+        }
         return env
     }
 

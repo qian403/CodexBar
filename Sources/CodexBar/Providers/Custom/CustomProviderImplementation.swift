@@ -43,9 +43,9 @@ struct CustomProviderImplementation: ProviderImplementation {
             ProviderSettingsFieldDescriptor(
                 id: "\(provider.rawValue)-base-url",
                 title: "Base URL",
-                subtitle: "OpenAI-compatible endpoint (new-api / one-api / sub2api).",
+                subtitle: "Relay site root (new-api / one-api / sub2api). Reads /api/user/self.",
                 kind: .plain,
-                placeholder: "https://api.example.com",
+                placeholder: "https://relay.example.com",
                 binding: Binding(
                     get: { settings.customBaseURL(for: provider) },
                     set: { settings.setCustomBaseURL(provider, $0) }),
@@ -53,14 +53,26 @@ struct CustomProviderImplementation: ProviderImplementation {
                 isVisible: nil,
                 onActivate: nil),
             ProviderSettingsFieldDescriptor(
-                id: "\(provider.rawValue)-api-key",
-                title: "API key",
-                subtitle: "Stored in ~/.codexbar/config.json. Used for /v1/dashboard/billing.",
+                id: "\(provider.rawValue)-access-token",
+                title: "Access token",
+                subtitle: "Account access token from the relay site (not the sk- API key).",
                 kind: .secure,
-                placeholder: "sk-…",
+                placeholder: "access token…",
                 binding: Binding(
                     get: { settings.customAPIKey(for: provider) },
                     set: { settings.setCustomAPIKey(provider, $0) }),
+                actions: [],
+                isVisible: nil,
+                onActivate: nil),
+            ProviderSettingsFieldDescriptor(
+                id: "\(provider.rawValue)-user-id",
+                title: "User ID",
+                subtitle: "Numeric account id, sent as the New-Api-User header.",
+                kind: .plain,
+                placeholder: "123",
+                binding: Binding(
+                    get: { settings.customUserID(for: provider) },
+                    set: { settings.setCustomUserID(provider, $0) }),
                 actions: [],
                 isVisible: nil,
                 onActivate: nil),

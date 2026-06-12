@@ -12,7 +12,7 @@ public enum CustomUsageError: LocalizedError, Sendable {
     public var errorDescription: String? {
         switch self {
         case .missingCredentials:
-            "Missing Custom provider API key. Set apiKey in ~/.codexbar/config.json or CUSTOM_PROVIDER_API_KEY."
+            "Missing Custom provider access token. Set apiKey in config.json or CUSTOM_PROVIDER_API_KEY."
         case .missingBaseURL:
             "Missing Custom provider base URL. Set enterpriseHost in config.json or CUSTOM_PROVIDER_BASE_URL."
         case let .apiError(message):
@@ -23,30 +23,31 @@ public enum CustomUsageError: LocalizedError, Sendable {
     }
 }
 
-/// Usage pulled from an OpenAI-compatible billing API (new-api / one-api / sub2api):
-/// `/v1/dashboard/billing/subscription` for the quota cap and
-/// `/v1/dashboard/billing/usage` for the amount used.
+/// Usage pulled from a new-api / one-api / sub2api relay's `/api/user/self`
+/// endpoint (the same source cc-switch reads). `quota` is the remaining balance
+/// and `used_quota` the amount spent, both in new-api "quota units" where
+/// 500,000 units = US$1.
 public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
-    public let hardLimitUSD: Double?
+    /// new-api stores balances in integer "quota" units; 500,000 == US$1.
+    public static let unitsPerUSD: Double = 500_000
+
+    public let remainingUSD: Double
     public let usedUSD: Double
+    public let planName: String?
     public let updatedAt: Date
 
-    public init(hardLimitUSD: Double?, usedUSD: Double, updatedAt: Date) {
-        self.hardLimitUSD = hardLimitUSD
+    public var totalUSD: Double { self.remainingUSD + self.usedUSD }
+
+    public init(remainingUSD: Double, usedUSD: Double, planName: String?, updatedAt: Date) {
+        self.remainingUSD = remainingUSD
         self.usedUSD = usedUSD
+        self.planName = planName
         self.updatedAt = updatedAt
     }
 
-    public var remainingUSD: Double? {
-        guard let limit = self.hardLimitUSD else { return nil }
-        return max(0, limit - self.usedUSD)
-    }
-
     public func toUsageSnapshot(for provider: UsageProvider = .custom) -> UsageSnapshot {
-        let usedPercent: Double? = {
-            guard let limit = self.hardLimitUSD, limit > 0 else { return nil }
-            return max(0, min(100, self.usedUSD / limit * 100))
-        }()
+        let total = self.totalUSD
+        let usedPercent: Double? = total > 0 ? max(0, min(100, self.usedUSD / total * 100)) : nil
         return UsageSnapshot(
             primary: usedPercent.map {
                 RateWindow(usedPercent: $0, windowMinutes: nil, resetsAt: nil, resetDescription: nil)
@@ -54,139 +55,100 @@ public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
             secondary: nil,
             providerCost: ProviderCostSnapshot(
                 used: self.usedUSD,
-                limit: self.hardLimitUSD ?? 0,
+                limit: total,
                 currencyCode: "USD",
-                period: "Quota",
+                period: "Balance",
                 updatedAt: self.updatedAt),
             updatedAt: self.updatedAt,
             identity: ProviderIdentitySnapshot(
                 providerID: provider,
                 accountEmail: nil,
                 accountOrganization: nil,
-                loginMethod: "billing-api"))
+                loginMethod: self.planName))
     }
 }
 
-private struct CustomSubscriptionResponse: Decodable {
-    let hardLimitUSD: Double?
+private struct NewAPIUserSelfResponse: Decodable {
+    struct UserData: Decodable {
+        let quota: Double?
+        let usedQuota: Double?
+        let group: String?
 
-    private enum CodingKeys: String, CodingKey {
-        case hardLimitUSD = "hard_limit_usd"
-        case systemHardLimitUSD = "system_hard_limit_usd"
+        private enum CodingKeys: String, CodingKey {
+            case quota
+            case usedQuota = "used_quota"
+            case group
+        }
     }
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.hardLimitUSD =
-            try container.decodeIfPresent(Double.self, forKey: .hardLimitUSD)
-            ?? container.decodeIfPresent(Double.self, forKey: .systemHardLimitUSD)
-    }
-}
-
-private struct CustomUsageResponse: Decodable {
-    /// `total_usage` is reported in US cents by the OpenAI billing API.
-    let totalUsageCents: Double
-
-    private enum CodingKeys: String, CodingKey {
-        case totalUsageCents = "total_usage"
-    }
+    let success: Bool?
+    let message: String?
+    let data: UserData?
 }
 
 public struct CustomUsageFetcher: Sendable {
     public init() {}
 
     public static func fetchUsage(
-        apiKey: String,
+        accessToken: String,
         baseURL: URL,
+        userID: String?,
         transport: any ProviderHTTPTransport = ProviderHTTPClient.shared,
-        now: Date = Date(),
         updatedAt: Date = Date()) async throws -> CustomUsageSnapshot
     {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw CustomUsageError.missingCredentials
         }
 
-        let subscription = try await self.decode(
-            CustomSubscriptionResponse.self,
-            url: self.billingURL(baseURL: baseURL, path: "subscription"),
-            apiKey: apiKey,
-            transport: transport)
-
-        let (start, end) = self.usageDateRange(now: now)
-        let usageURL = self.billingURL(
-            baseURL: baseURL,
-            path: "usage",
-            queryItems: [
-                URLQueryItem(name: "start_date", value: start),
-                URLQueryItem(name: "end_date", value: end),
-            ])
-        let usage = try await self.decode(
-            CustomUsageResponse.self,
-            url: usageURL,
-            apiKey: apiKey,
-            transport: transport)
-
-        return CustomUsageSnapshot(
-            hardLimitUSD: subscription.hardLimitUSD,
-            usedUSD: usage.totalUsageCents / 100,
-            updatedAt: updatedAt)
-    }
-
-    public static func _billingURLForTesting(baseURL: URL, path: String) -> URL {
-        self.billingURL(baseURL: baseURL, path: path)
-    }
-
-    private static func decode<T: Decodable>(
-        _ type: T.Type,
-        url: URL,
-        apiKey: String,
-        transport: any ProviderHTTPTransport) async throws -> T
-    {
-        var request = URLRequest(url: url)
+        var request = URLRequest(url: self.userSelfURL(baseURL: baseURL))
         request.httpMethod = "GET"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        if let userID, !userID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            request.setValue(userID, forHTTPHeaderField: "New-Api-User")
+        }
 
         let response = try await transport.response(for: request)
         guard (200..<300).contains(response.statusCode) else {
             throw CustomUsageError.apiError("HTTP \(response.statusCode): \(self.responseSummary(response.data))")
         }
+        return try self.parse(data: response.data, updatedAt: updatedAt)
+    }
+
+    public static func _userSelfURLForTesting(baseURL: URL) -> URL {
+        self.userSelfURL(baseURL: baseURL)
+    }
+
+    public static func _parseForTesting(_ data: Data, updatedAt: Date) throws -> CustomUsageSnapshot {
+        try self.parse(data: data, updatedAt: updatedAt)
+    }
+
+    private static func parse(data: Data, updatedAt: Date) throws -> CustomUsageSnapshot {
         do {
-            return try JSONDecoder().decode(T.self, from: response.data)
+            let decoded = try JSONDecoder().decode(NewAPIUserSelfResponse.self, from: data)
+            guard let user = decoded.data else {
+                throw CustomUsageError.apiError(decoded.message ?? "No user data returned.")
+            }
+            let units = CustomUsageSnapshot.unitsPerUSD
+            return CustomUsageSnapshot(
+                remainingUSD: (user.quota ?? 0) / units,
+                usedUSD: (user.usedQuota ?? 0) / units,
+                planName: user.group?.isEmpty == false ? user.group : nil,
+                updatedAt: updatedAt)
+        } catch let error as CustomUsageError {
+            throw error
         } catch {
             throw CustomUsageError.parseFailed(error.localizedDescription)
         }
     }
 
-    private static func billingURL(
-        baseURL: URL,
-        path: String,
-        queryItems: [URLQueryItem] = []) -> URL
-    {
-        let trimmed = baseURL.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let versioned = trimmed.split(separator: "/").last == "v1"
-            ? baseURL
-            : baseURL.appendingPathComponent("v1")
-        let url = versioned
-            .appendingPathComponent("dashboard")
-            .appendingPathComponent("billing")
-            .appendingPathComponent(path)
-        guard !queryItems.isEmpty,
-              var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
-        else { return url }
-        components.queryItems = queryItems
-        return components.url ?? url
-    }
-
-    private static func usageDateRange(now: Date) -> (start: String, end: String) {
-        let formatter = DateFormatter()
-        formatter.calendar = Calendar(identifier: .gregorian)
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
-        formatter.dateFormat = "yyyy-MM-dd"
-        let start = Calendar.current.date(byAdding: .day, value: -365, to: now) ?? now
-        let end = Calendar.current.date(byAdding: .day, value: 1, to: now) ?? now
-        return (formatter.string(from: start), formatter.string(from: end))
+    private static func userSelfURL(baseURL: URL) -> URL {
+        // Strip a trailing /v1 the user may have copied from an inference base URL.
+        var root = baseURL
+        if root.lastPathComponent == "v1" {
+            root = root.deletingLastPathComponent()
+        }
+        return root.appendingPathComponent("api").appendingPathComponent("user").appendingPathComponent("self")
     }
 
     private static func responseSummary(_ data: Data) -> String {

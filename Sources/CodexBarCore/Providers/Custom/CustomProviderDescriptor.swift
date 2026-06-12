@@ -63,7 +63,11 @@ struct CustomAPIFetchStrategy: ProviderFetchStrategy {
         guard let baseURL = CustomSettingsReader.baseURL(for: self.provider, environment: context.env) else {
             throw CustomUsageError.missingBaseURL
         }
-        let usage = try await CustomUsageFetcher.fetchUsage(apiKey: apiKey, baseURL: baseURL)
+        let userID = CustomSettingsReader.userID(for: self.provider, environment: context.env)
+        let usage = try await CustomUsageFetcher.fetchUsage(
+            accessToken: apiKey,
+            baseURL: baseURL,
+            userID: userID)
         return self.makeResult(usage: usage.toUsageSnapshot(for: self.provider), sourceLabel: "api")
     }
 

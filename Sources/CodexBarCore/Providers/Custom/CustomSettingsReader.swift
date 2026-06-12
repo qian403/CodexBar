@@ -28,6 +28,17 @@ public enum CustomSettingsReader {
         return URL(string: raw)
     }
 
+    public static func userIDEnvironmentKey(for provider: UsageProvider) -> String {
+        self.environmentKey(for: provider, suffix: "USER_ID")
+    }
+
+    public static func userID(
+        for provider: UsageProvider,
+        environment: [String: String] = ProcessInfo.processInfo.environment) -> String?
+    {
+        self.cleaned(environment[self.userIDEnvironmentKey(for: provider)])
+    }
+
     private static func environmentKey(for provider: UsageProvider, suffix: String) -> String {
         let index = provider.customIndex ?? 1
         return index <= 1 ? "CUSTOM_PROVIDER_\(suffix)" : "CUSTOM_PROVIDER_\(index)_\(suffix)"
