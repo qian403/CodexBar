@@ -20,7 +20,25 @@ struct ProvidersPane: View {
     @State private var selectedProvider: UsageProvider?
 
     private var providers: [UsageProvider] {
-        self.settings.orderedProviders()
+        Self.collapsingCustomSlots(self.settings.orderedProviders(), settings: self.settings)
+    }
+
+    /// Shows configured custom slots plus the next empty one (the "+ add" affordance),
+    /// hiding the remaining unused slots so the list stays tidy.
+    static func collapsingCustomSlots(
+        _ providers: [UsageProvider],
+        settings: SettingsStore) -> [UsageProvider]
+    {
+        var shownEmptySlot = false
+        return providers.filter { provider in
+            guard provider.isCustom else { return true }
+            if settings.isCustomSlotConfigured(provider) { return true }
+            if !shownEmptySlot {
+                shownEmptySlot = true
+                return true
+            }
+            return false
+        }
     }
 
     private var filteredProviders: [UsageProvider] {

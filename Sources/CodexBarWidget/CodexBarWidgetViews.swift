@@ -312,7 +312,8 @@ private struct ProviderSwitchChip: View {
         case .groq: "Groq"
         case .llmproxy: "LLM Proxy"
         case .deepgram: "Deepgram"
-        case .custom: "Custom"
+        case .custom, .custom2, .custom3, .custom4, .custom5,
+             .custom6, .custom7, .custom8, .custom9, .custom10: "Custom"
         }
     }
 }
@@ -745,7 +746,8 @@ enum WidgetColors {
             Color(red: 36 / 255, green: 180 / 255, blue: 126 / 255)
         case .deepgram:
             Color(red: 10 / 255, green: 18 / 255, blue: 27 / 255)
-        case .custom:
+        case .custom, .custom2, .custom3, .custom4, .custom5,
+             .custom6, .custom7, .custom8, .custom9, .custom10:
             Color(red: 124 / 255, green: 132 / 255, blue: 148 / 255)
         }
     }

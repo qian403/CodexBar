@@ -53,9 +53,41 @@ public enum UsageProvider: String, CaseIterable, Sendable, Codable {
     case llmproxy
     case deepgram
     case custom
+    case custom2
+    case custom3
+    case custom4
+    case custom5
+    case custom6
+    case custom7
+    case custom8
+    case custom9
+    case custom10
 }
 
 // swiftformat:enable sortDeclarations
+
+extension UsageProvider {
+    /// The fixed pool of user-configurable "Custom" provider slots, in order.
+    public static let customSlots: [UsageProvider] = [
+        .custom, .custom2, .custom3, .custom4, .custom5,
+        .custom6, .custom7, .custom8, .custom9, .custom10,
+    ]
+
+    public var isCustom: Bool {
+        Self.customSlots.contains(self)
+    }
+
+    /// 1-based index of this custom slot, or nil for non-custom providers.
+    public var customIndex: Int? {
+        Self.customSlots.firstIndex(of: self).map { $0 + 1 }
+    }
+
+    /// Default display name for a custom slot ("Custom", "Custom 2", …).
+    public var customDefaultDisplayName: String? {
+        guard let index = self.customIndex else { return nil }
+        return index == 1 ? "Custom" : "Custom \(index)"
+    }
+}
 
 public enum IconStyle: String, Sendable, CaseIterable {
     case codex
@@ -106,12 +138,21 @@ public enum IconStyle: String, Sendable, CaseIterable {
     case llmproxy
     case deepgram
     case custom
+    case custom2
+    case custom3
+    case custom4
+    case custom5
+    case custom6
+    case custom7
+    case custom8
+    case custom9
+    case custom10
     case combined
 }
 
 public struct ProviderMetadata: Sendable {
     public let id: UsageProvider
-    public let displayName: String
+    public var displayName: String
     public let sessionLabel: String
     public let weeklyLabel: String
     public let opusLabel: String?

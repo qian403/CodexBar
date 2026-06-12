@@ -429,9 +429,6 @@ final class UsageStore {
         self.settings.statusChecksEnabled
     }
 
-    func metadata(for provider: UsageProvider) -> ProviderMetadata {
-        self.providerMetadata[provider]!
-    }
 
     var codexBrowserCookieOrder: BrowserCookieImportOrder {
         self.metadata(for: .codex).browserCookieOrder ?? Browser.defaultImportOrder
@@ -1144,7 +1141,9 @@ extension UsageStore {
                 case .gemini, .antigravity, .opencode, .opencodego, .alibabatokenplan, .factory, .copilot, .devin,
                      .vertexai, .kilo, .kiro, .kimi, .kimik2, .moonshot, .jetbrains, .perplexity, .mimo, .doubao,
                      .abacus, .mistral, .codebuff, .crof, .windsurf, .venice, .manus, .commandcode, .stepfun, .bedrock,
-                     .grok, .groq, .t3chat, .llmproxy, .deepgram, .custom:
+                     .grok, .groq, .t3chat, .llmproxy, .deepgram,
+                     .custom, .custom2, .custom3, .custom4, .custom5,
+                     .custom6, .custom7, .custom8, .custom9, .custom10:
                     return unimplementedDebugLogMessages[provider] ?? "Debug log not yet implemented"
                 }
             }

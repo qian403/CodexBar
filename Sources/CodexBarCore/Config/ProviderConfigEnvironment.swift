@@ -18,8 +18,8 @@ public enum ProviderConfigEnvironment {
         if provider == .llmproxy {
             return self.applyLLMProxyOverrides(base: base, config: config)
         }
-        if provider == .custom {
-            return self.applyCustomOverrides(base: base, config: config)
+        if provider.isCustom {
+            return self.applyCustomOverrides(provider: provider, base: base, config: config)
         }
         if provider == .azureopenai {
             return self.applyAzureOpenAIOverrides(base: base, config: config)
@@ -222,15 +222,16 @@ public enum ProviderConfigEnvironment {
     }
 
     private static func applyCustomOverrides(
+        provider: UsageProvider,
         base: [String: String],
         config: ProviderConfig?) -> [String: String]
     {
         var env = base
         if let apiKey = config?.sanitizedAPIKey {
-            env[CustomSettingsReader.apiKeyEnvironmentKey] = apiKey
+            env[CustomSettingsReader.apiKeyEnvironmentKey(for: provider)] = apiKey
         }
         if let baseURL = config?.sanitizedEnterpriseHost {
-            env[CustomSettingsReader.baseURLEnvironmentKey] = baseURL
+            env[CustomSettingsReader.baseURLEnvironmentKey(for: provider)] = baseURL
         }
         return env
     }

@@ -2,6 +2,14 @@ import CodexBarCore
 import Foundation
 
 extension UsageStore {
+    func metadata(for provider: UsageProvider) -> ProviderMetadata {
+        var metadata = self.providerMetadata[provider]!
+        if provider.isCustom {
+            metadata.displayName = self.settings.resolvedCustomDisplayName(for: provider)
+        }
+        return metadata
+    }
+
     var codexSnapshot: UsageSnapshot? {
         self.snapshots[.codex]
     }

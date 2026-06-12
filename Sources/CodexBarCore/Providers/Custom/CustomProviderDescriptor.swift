@@ -1,23 +1,23 @@
-import CodexBarMacroSupport
 import Foundation
 
-@ProviderDescriptorRegistration
-@ProviderDescriptorDefinition
-public enum CustomProviderDescriptor {
-    static func makeDescriptor() -> ProviderDescriptor {
+/// Builds descriptors for each user-configurable "Custom" provider slot. Slots use
+/// the OpenAI-compatible billing endpoints (new-api / one-api / sub2api) with a
+/// per-slot base URL + API key.
+public enum CustomProviderDescriptors {
+    public static func descriptor(for provider: UsageProvider) -> ProviderDescriptor {
         ProviderDescriptor(
-            id: .custom,
+            id: provider,
             metadata: ProviderMetadata(
-                id: .custom,
-                displayName: "Custom",
+                id: provider,
+                displayName: provider.customDefaultDisplayName ?? "Custom",
                 sessionLabel: "Quota",
                 weeklyLabel: "Used",
                 opusLabel: nil,
                 supportsOpus: false,
                 supportsCredits: false,
                 creditsHint: "",
-                toggleTitle: "Show Custom provider usage",
-                cliName: "custom",
+                toggleTitle: "Show \(provider.customDefaultDisplayName ?? "Custom") usage",
+                cliName: provider.rawValue,
                 defaultEnabled: false,
                 isPrimaryProvider: false,
                 usesAccountFallback: false,
@@ -33,32 +33,38 @@ public enum CustomProviderDescriptor {
                 noDataMessage: { "Custom provider spend is shown in the usage limits." }),
             fetchPlan: ProviderFetchPlan(
                 sourceModes: [.auto, .api],
-                pipeline: ProviderFetchPipeline(resolveStrategies: { _ in [CustomAPIFetchStrategy()] })),
+                pipeline: ProviderFetchPipeline(resolveStrategies: { _ in
+                    [CustomAPIFetchStrategy(provider: provider)]
+                })),
             cli: ProviderCLIConfig(
-                name: "custom",
-                aliases: ["new-api", "newapi", "one-api", "oneapi", "sub2api"],
+                name: provider.rawValue,
+                aliases: provider == .custom ? ["new-api", "newapi", "one-api", "oneapi", "sub2api"] : [],
                 versionDetector: nil))
     }
 }
 
 struct CustomAPIFetchStrategy: ProviderFetchStrategy {
-    let id: String = "custom.api"
+    let provider: UsageProvider
     let kind: ProviderFetchKind = .apiToken
 
+    var id: String {
+        "\(self.provider.rawValue).api"
+    }
+
     func isAvailable(_ context: ProviderFetchContext) async -> Bool {
-        ProviderTokenResolver.customToken(environment: context.env) != nil &&
-            CustomSettingsReader.baseURL(environment: context.env) != nil
+        ProviderTokenResolver.customToken(for: self.provider, environment: context.env) != nil &&
+            CustomSettingsReader.baseURL(for: self.provider, environment: context.env) != nil
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        guard let apiKey = ProviderTokenResolver.customToken(environment: context.env) else {
+        guard let apiKey = ProviderTokenResolver.customToken(for: self.provider, environment: context.env) else {
             throw CustomUsageError.missingCredentials
         }
-        guard let baseURL = CustomSettingsReader.baseURL(environment: context.env) else {
+        guard let baseURL = CustomSettingsReader.baseURL(for: self.provider, environment: context.env) else {
             throw CustomUsageError.missingBaseURL
         }
         let usage = try await CustomUsageFetcher.fetchUsage(apiKey: apiKey, baseURL: baseURL)
-        return self.makeResult(usage: usage.toUsageSnapshot(), sourceLabel: "api")
+        return self.makeResult(usage: usage.toUsageSnapshot(for: self.provider), sourceLabel: "api")
     }
 
     func shouldFallback(on _: Error, context _: ProviderFetchContext) -> Bool {

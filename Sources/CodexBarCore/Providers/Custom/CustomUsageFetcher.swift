@@ -42,7 +42,7 @@ public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
         return max(0, limit - self.usedUSD)
     }
 
-    public func toUsageSnapshot() -> UsageSnapshot {
+    public func toUsageSnapshot(for provider: UsageProvider = .custom) -> UsageSnapshot {
         let usedPercent: Double? = {
             guard let limit = self.hardLimitUSD, limit > 0 else { return nil }
             return max(0, min(100, self.usedUSD / limit * 100))
@@ -60,7 +60,7 @@ public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
                 updatedAt: self.updatedAt),
             updatedAt: self.updatedAt,
             identity: ProviderIdentitySnapshot(
-                providerID: .custom,
+                providerID: provider,
                 accountEmail: nil,
                 accountOrganization: nil,
                 loginMethod: "billing-api"))
