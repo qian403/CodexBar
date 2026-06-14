@@ -36,7 +36,9 @@ public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
     public let planName: String?
     public let updatedAt: Date
 
-    public var totalUSD: Double { self.remainingUSD + self.usedUSD }
+    public var totalUSD: Double {
+        self.remainingUSD + self.usedUSD
+    }
 
     public init(remainingUSD: Double, usedUSD: Double, planName: String?, updatedAt: Date) {
         self.remainingUSD = remainingUSD

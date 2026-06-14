@@ -13,7 +13,19 @@ extension UsageStore {
     /// Providers whose daily token history is produced by scanning local logs/DBs and can
     /// therefore be re-scanned for an arbitrary window (used by the dashboard to fill a full
     /// year regardless of the menu's `costUsageHistoryDays` setting).
-    private static let extendedHistoryProviders: Set<UsageProvider> = [.codex, .claude, .vertexai, .opencode]
+    private static let extendedHistoryProviders: Set<UsageProvider> = [
+        .codex,
+        .claude,
+        .vertexai,
+        .opencode,
+        .opencodego,
+    ]
+
+    /// Providers that expose a per-request log view in the dashboard. Currently
+    /// only OpenCode (and its Go tier) — Codex/Claude/VertexAI readers don't
+    /// produce per-message granularity, so the request log stays OpenCode-only
+    /// for now.
+    private static let requestLogProviders: Set<UsageProvider> = [.opencode, .opencodego]
 
     /// Loads up to `days` of daily token entries for the dashboard. Local-scan providers are
     /// re-scanned for the wider window; everything else falls back to the cached snapshot.
@@ -154,5 +166,39 @@ extension UsageStore {
 
     nonisolated static func tokenCostNoDataMessage(for provider: UsageProvider) -> String {
         ProviderDescriptorRegistry.descriptor(for: provider).tokenCost.noDataMessage()
+    }
+
+    // MARK: - Per-request log (OpenCode only)
+
+    /// Returns the cached per-request log for a provider, or nil if it hasn't
+    /// been loaded yet.
+    func openCodeRequestLog(for provider: UsageProvider) -> OpenCodeRequestLog? {
+        self.openCodeRequestLogs[provider]
+    }
+
+    /// Loads the OpenCode per-request log for the dashboard's `range`. Caches
+    /// the result on the store so switching away and back doesn't re-scan the
+    /// SQLite file. Returns nil for providers that don't support per-request
+    /// logs.
+    func loadOpenCodeRequestLog(
+        for provider: UsageProvider,
+        rangeWeeks: Int,
+        now: Date = Date(),
+        maxEntries: Int = 500) async
+    {
+        guard Self.requestLogProviders.contains(provider) else { return }
+
+        let days = max(1, min(365, rangeWeeks * 7))
+        let until = now
+        let since = Calendar.current.date(byAdding: .day, value: -(days - 1), to: now) ?? now
+
+        let log = await Task.detached(priority: .utility) {
+            OpenCodeCostUsageReader.loadRequestLog(
+                since: since,
+                until: until,
+                maxEntries: maxEntries,
+                environment: ProcessInfo.processInfo.environment)
+        }.value
+        self.openCodeRequestLogs[provider] = log
     }
 }

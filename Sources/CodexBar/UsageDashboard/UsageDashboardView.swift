@@ -65,6 +65,7 @@ struct UsageDashboardView: View {
         .onChange(of: self.range) { _, _ in self.refreshHeatmap() }
         .onChange(of: self.dailySignature) { _, _ in self.refreshHeatmap() }
         .task(id: self.selection) { await self.loadExtendedForSelection() }
+        .task(id: self.requestLogReloadKey) { await self.loadRequestLogForSelection() }
     }
 
     // MARK: Sidebar
@@ -168,6 +169,9 @@ struct UsageDashboardView: View {
                         self.metricsRow
                         self.trendSection
                         self.modelsSection
+                        if self.shouldShowRequestLog {
+                            self.requestLogSection
+                        }
                         self.daySection
                     } else {
                         self.noTokenHistoryNote
@@ -374,6 +378,67 @@ struct UsageDashboardView: View {
             }
         }
         return text
+    }
+
+    // MARK: Request log (OpenCode only)
+
+    /// Only OpenCode and OpenCode Go expose per-request granularity today;
+    /// Codex/Claude/VertexAI readers don't produce per-message entries.
+    private var shouldShowRequestLog: Bool {
+        if case let .provider(provider) = self.selection,
+           provider == .opencode || provider == .opencodego
+        {
+            return true
+        }
+        return false
+    }
+
+    /// Combined key so the request log reloads when either selection or range
+    /// changes (range affects how many days of data we scan).
+    private var requestLogReloadKey: String {
+        let providerPart: String = if case let .provider(provider) = self.selection {
+            provider.rawValue
+        } else {
+            "overview"
+        }
+        return "\(providerPart)-\(self.range.weeks)"
+    }
+
+    @ViewBuilder
+    private var requestLogSection: some View {
+        if case let .provider(provider) = self.selection,
+           let log = self.store.openCodeRequestLog(for: provider)
+        {
+            OpenCodeRequestLogView(
+                log: log,
+                selectionColor: self.selectionColor)
+        } else {
+            // Empty placeholder so the layout doesn't jump when the log is
+            // still loading. Mirrors the heatmap's "no data" treatment.
+            VStack(alignment: .leading, spacing: 6) {
+                Text(L("Recent requests"))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                Text(L("Loading OpenCode request log…"))
+                    .font(.system(size: 11))
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(nsColor: .controlBackgroundColor)))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08)))
+        }
+    }
+
+    private func loadRequestLogForSelection() async {
+        guard case let .provider(provider) = self.selection,
+              provider == .opencode || provider == .opencodego
+        else { return }
+        await self.store.loadOpenCodeRequestLog(
+            for: provider,
+            rangeWeeks: self.range.weeks)
     }
 
     // MARK: Heatmap

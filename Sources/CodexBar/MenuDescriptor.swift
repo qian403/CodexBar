@@ -584,7 +584,7 @@ struct MenuDescriptor {
         }
         entries.append(contentsOf: [
             .action(L("Refresh"), .refresh),
-            .action(L("Usage Heatmap…"), .usageWindow),
+            .action(L("Usage Dashboard…"), .usageWindow),
             .action(L("Settings..."), .settings),
             .action(L("About CodexBar"), .about),
             .action(L("Quit"), .quit),
