@@ -505,6 +505,10 @@
 "show_provider_changelog_links_subtitle" = "在選單中為支援的 CLI 提供者新增發行說明連結。";
 "show_credits_extra_usage_title" = "顯示額度 + 額外使用量";
 "show_credits_extra_usage_subtitle" = "在選單中顯示 Codex 額度和 Claude 額外使用量部分。";
+"dashboard_sidebar_value_title" = "儀表板側邊欄數值";
+"dashboard_sidebar_value_subtitle" = "在儀表板側邊欄每個提供者旁邊顯示的內容。";
+"dashboard_sidebar_value_tokens" = "今日 token 數";
+"dashboard_sidebar_value_percent" = "主視窗 %";
 "show_all_token_accounts_title" = "顯示所有 token 帳號";
 "show_all_token_accounts_subtitle" = "在選單中堆疊 token 帳號（否則顯示帳號切換欄）。";
 "multi_account_layout_title" = "多帳號版面配置";

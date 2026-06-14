@@ -111,6 +111,24 @@ struct DisplayPane: View {
                         binding: self.$settings.showOptionalCreditsAndExtraUsage)
                     HStack(alignment: .top, spacing: 12) {
                         VStack(alignment: .leading, spacing: 4) {
+                            Text(L("dashboard_sidebar_value_title"))
+                                .font(.body)
+                            Text(L("dashboard_sidebar_value_subtitle"))
+                                .font(.footnote)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Picker(L("dashboard_sidebar_value_title"), selection: self.$settings.dashboardSidebarDisplay) {
+                            ForEach(DashboardSidebarDisplay.allCases) { mode in
+                                Text(mode.label).tag(mode)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: 200)
+                    }
+                    HStack(alignment: .top, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 4) {
                             Text(L("multi_account_layout_title"))
                                 .font(.body)
                             Text(L("multi_account_layout_subtitle"))

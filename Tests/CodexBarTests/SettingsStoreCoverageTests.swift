@@ -72,6 +72,16 @@ struct SettingsStoreCoverageTests {
 
         settings.resetTimesShowAbsolute = true
         #expect(settings.resetTimeDisplayStyle == .absolute)
+
+        // Dashboard sidebar value: defaults to .tokens so existing users see
+        // no change. Explicit writes round-trip through UserDefaults and
+        // the typed enum.
+        let sidebarSettings = Self.makeSettingsStore(suiteName: "SettingsStoreCoverageTests-dashboard-sidebar")
+        #expect(sidebarSettings.dashboardSidebarDisplay == .tokens)
+        sidebarSettings.dashboardSidebarDisplay = .percent
+        #expect(sidebarSettings.dashboardSidebarDisplay == .percent)
+        sidebarSettings.dashboardSidebarDisplay = .tokens
+        #expect(sidebarSettings.dashboardSidebarDisplay == .tokens)
     }
 
     @Test

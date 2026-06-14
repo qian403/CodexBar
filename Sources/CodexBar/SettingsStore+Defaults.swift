@@ -288,6 +288,26 @@ extension SettingsStore {
         }
     }
 
+    private var dashboardSidebarDisplayRaw: String? {
+        get { self.defaultsState.dashboardSidebarDisplayRaw }
+        set {
+            self.defaultsState.dashboardSidebarDisplayRaw = newValue
+            if let raw = newValue {
+                self.userDefaults.set(raw, forKey: "dashboardSidebarDisplay")
+            } else {
+                self.userDefaults.removeObject(forKey: "dashboardSidebarDisplay")
+            }
+        }
+    }
+
+    /// What value the dashboard sidebar shows on the right side of each
+    /// provider row. Defaults to `.tokens` (current behavior) so existing
+    /// users see no change.
+    var dashboardSidebarDisplay: DashboardSidebarDisplay {
+        get { DashboardSidebarDisplay(rawValue: self.dashboardSidebarDisplayRaw ?? "") ?? .tokens }
+        set { self.dashboardSidebarDisplayRaw = newValue.rawValue }
+    }
+
     var costUsageEnabled: Bool {
         get { self.defaultsState.costUsageEnabled }
         set {

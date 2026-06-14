@@ -982,6 +982,18 @@ extension UsageDashboardView {
     }
 
     private var overviewSidebarValue: String {
+        switch self.settings.dashboardSidebarDisplay {
+        case .percent:
+            self.overviewPercentValue
+        case .tokens:
+            self.overviewTokensValue
+        }
+    }
+
+    /// Sum today's token usage across every provider that has a daily
+    /// snapshot. Mirrors the legacy `.tokens` behavior — empty when no
+    /// provider has produced any token data for today.
+    private var overviewTokensValue: String {
         let todayKey = UsageHeatmapData.dayKey(for: Date(), calendar: .current)
         var tokens = 0
         for provider in self.dashboardProviders {
@@ -991,7 +1003,33 @@ extension UsageDashboardView {
         return tokens > 0 ? UsageFormatter.tokenCountString(tokens) : "—"
     }
 
+    /// Average primary-window usage across enabled providers. Used when
+    /// the user opts into `.percent` mode on the sidebar.
+    private var overviewPercentValue: String {
+        var sum: Double = 0
+        var count = 0
+        for provider in self.dashboardProviders {
+            guard let window = self.store.snapshot(for: provider)?.primary else { continue }
+            sum += min(100, max(0, window.usedPercent))
+            count += 1
+        }
+        guard count > 0 else { return "—" }
+        return String(format: "%.0f%%", sum / Double(count))
+    }
+
     private func sidebarValue(for provider: UsageProvider) -> String {
+        switch self.settings.dashboardSidebarDisplay {
+        case .percent:
+            self.percentValue(for: provider)
+        case .tokens:
+            self.tokensValue(for: provider)
+        }
+    }
+
+    /// Today's token total for `provider`, when a daily token snapshot
+    /// exists. Matches the legacy `.tokens` value that pre-dated the
+    /// setting.
+    private func tokensValue(for provider: UsageProvider) -> String {
         if let daily = self.store.tokenSnapshot(for: provider)?.daily, !daily.isEmpty {
             let todayKey = UsageHeatmapData.dayKey(for: Date(), calendar: .current)
             if let entry = daily.first(where: { $0.date == todayKey }) {
@@ -999,10 +1037,15 @@ extension UsageDashboardView {
             }
             return "—"
         }
-        if let window = self.store.snapshot(for: provider)?.primary {
-            return String(format: "%.0f%%", min(100, max(0, window.usedPercent)))
-        }
         return "—"
+    }
+
+    /// Primary-window used percent for `provider`. Returns `"—"` when the
+    /// provider has no primary window at all (e.g. an unconfigured
+    /// OpenCode).
+    private func percentValue(for provider: UsageProvider) -> String {
+        guard let window = self.store.snapshot(for: provider)?.primary else { return "—" }
+        return String(format: "%.0f%%", min(100, max(0, window.usedPercent)))
     }
 
     private func combinedValueString(tokens: Int, cost: Double) -> String {
