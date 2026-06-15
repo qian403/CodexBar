@@ -35,8 +35,16 @@ struct TokenHeatmapView: View {
                     let path = Path(roundedRect: rect, cornerRadius: 2)
                     context.fill(path, with: .color(self.fill(for: level)))
                     if let selectedDayKey, cell.day?.dayKey == selectedDayKey {
+                        // Inset the stroke by half the line width so the path
+                        // stays inside the cell. The old version expanded
+                        // outward (`insetBy(dx: -1, dy: -1)`) and got clipped
+                        // by the Canvas at the grid edges, chopping the
+                        // corner off first-row / first-column cells.
+                        let strokeInset: CGFloat = 0.75
                         context.stroke(
-                            Path(roundedRect: rect.insetBy(dx: -1, dy: -1), cornerRadius: 3),
+                            Path(
+                                roundedRect: rect.insetBy(dx: strokeInset, dy: strokeInset),
+                                cornerRadius: 1.5),
                             with: .color(Color.primary.opacity(0.85)),
                             lineWidth: 1.5)
                     }
