@@ -103,7 +103,7 @@ public struct CostUsageFetcher: Sendable {
             .Options? = nil) async throws -> CostUsageTokenSnapshot
     {
         guard provider == .codex || provider == .claude || provider == .vertexai
-            || provider == .bedrock || provider == .opencode
+            || provider == .bedrock || provider == .opencode || provider == .opencodego
         else {
             throw CostUsageError.unsupportedProvider(provider)
         }
@@ -121,7 +121,11 @@ public struct CostUsageFetcher: Sendable {
             return Self.tokenSnapshot(from: daily, now: now, historyDays: clampedHistoryDays)
         }
 
-        if provider == .opencode {
+        if provider == .opencode || provider == .opencodego {
+            // Both providers read the same OpenCode local SQLite database; the
+            // split is purely a CodexBar-side display concern. Loading them
+            // here means the per-day aggregation, heatmap, stats, and trend
+            // all work for .opencodego just like .opencode.
             let daily = OpenCodeCostUsageReader.loadDailyReport(
                 since: since,
                 until: until,

@@ -141,6 +141,11 @@ final class UsageStore {
     var tokenSnapshots: [UsageProvider: CostUsageTokenSnapshot] = [:]
     var tokenErrors: [UsageProvider: String] = [:]
     var tokenRefreshInFlight: Set<UsageProvider> = []
+    /// Per-request log cache, populated on demand by `loadOpenCodeRequestLog`.
+    /// Keyed by provider so both `.opencode` and `.opencodego` can keep
+    /// independent copies (they share the underlying OpenCode SQLite, but
+    /// the dashboard only renders the log for the active selection).
+    var openCodeRequestLogs: [UsageProvider: OpenCodeRequestLog] = [:]
     var credits: CreditsSnapshot?
     var lastCreditsError: String?
     var openAIDashboard: OpenAIDashboardSnapshot?
@@ -428,7 +433,6 @@ final class UsageStore {
     var statusChecksEnabled: Bool {
         self.settings.statusChecksEnabled
     }
-
 
     var codexBrowserCookieOrder: BrowserCookieImportOrder {
         self.metadata(for: .codex).browserCookieOrder ?? Browser.defaultImportOrder
