@@ -29,8 +29,8 @@ public enum OpenCodeGoProviderDescriptor {
                 iconResourceName: "ProviderIcon-opencodego",
                 color: ProviderColor(red: 59 / 255, green: 130 / 255, blue: 246 / 255)),
             tokenCost: ProviderTokenCostConfig(
-                supportsTokenCost: false,
-                noDataMessage: { "OpenCode Go cost summary is not supported." }),
+                supportsTokenCost: true,
+                noDataMessage: { "No OpenCode Go usage found in the local database yet." }),
             fetchPlan: ProviderFetchPlan(
                 sourceModes: [.auto, .web],
                 pipeline: ProviderFetchPipeline(resolveStrategies: self.resolveStrategies)),
