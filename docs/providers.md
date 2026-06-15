@@ -8,7 +8,7 @@ read_when:
 
 # Providers
 
-CodexBar currently registers 49 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
+CodexBar currently registers 50 provider IDs. Some companies expose multiple surfaces, such as Codex vs OpenAI API or
 OpenCode vs OpenCode Go, because the auth source and quota shape differ.
 
 ## Fetch strategies (current)
@@ -37,7 +37,7 @@ headers, source selection, provider ordering, and token accounts are stored in `
 | z.ai | API token from config/env → quota API (`api`). |
 | Manus | Browser `session_id` cookie (auto/manual/env) → credits API (`web`). |
 | MiniMax | Manual/browser session via Coding Plan web path (`web`), or Coding Plan API token (`api`). |
-| Kimi | Auth token from `kimi-auth` cookie/manual token/env → usage API (`web`). |
+| Kimi | Kimi Code API key (`api`), then `kimi-auth` cookie/manual token/env fallback (`web`). |
 | Kilo | API token from config/env → usage API (`api`); auto falls back to CLI session auth (`cli`). |
 | Copilot | Device-flow/env/config token → `copilot_internal` API (`api`). |
 | Kimi K2 (unofficial) | API key from config/env → legacy credit endpoint (`api`). |
@@ -45,7 +45,7 @@ headers, source selection, provider ordering, and token accounts are stored in `
 | Vertex AI | Google ADC OAuth (gcloud) → Cloud Monitoring quota usage (`oauth`). |
 | Augment | `auggie` CLI first, then browser-cookie web fallback (`cli`, `web`). |
 | JetBrains AI | Local XML quota file (`local`). |
-| Amp | Web settings page via browser cookies (`web`). |
+| Amp | Local `amp usage` CLI, access-token API, then browser-cookie legacy fallback (`cli`, `api`, `web`). |
 | T3 Chat | Web tRPC customer-data endpoint via browser cookies (`web`). |
 | Warp | API token (config/env) → GraphQL request limits (`api`). |
 | ElevenLabs | API key from config/env → subscription usage API (`api`). |
@@ -69,6 +69,7 @@ headers, source selection, provider ordering, and token accounts are stored in `
 | Grok | `grok agent stdio` JSON-RPC `x.ai/billing` (`cli`) → grok.com billing gRPC-web via Chrome session cookies (`web`); local `~/.grok/sessions` signals as fallback. |
 | GroqCloud | API key → Prometheus metrics API for request/token/cache-hit rates (`api`). |
 | LLM Proxy | API key + base URL → `/v1/quota-stats` aggregate proxy usage (`api`). |
+| LiteLLM | API key + base URL → `/key/info`, then `/user/info` or `/team/info` budget usage (`api`). |
 | Deepgram | API key → project discovery and usage breakdown API (`api`). |
 
 ## Codex
@@ -129,7 +130,8 @@ headers, source selection, provider ordering, and token accounts are stored in `
 - Details: `docs/minimax.md`.
 
 ## Kimi
-- Auth token (JWT from `kimi-auth` cookie) via manual entry or `KIMI_AUTH_TOKEN` env var.
+- Kimi Code API key via `~/.codexbar/config.json` or `KIMI_CODE_API_KEY`.
+- Web fallback uses the JWT from `kimi-auth` cookie via manual entry or `KIMI_AUTH_TOKEN` env var.
 - Shows weekly quota and 5-hour rate limit (300 minutes).
 - Status: none yet.
 - Details: `docs/kimi.md`.
@@ -251,8 +253,10 @@ headers, source selection, provider ordering, and token accounts are stored in `
 - Details: `docs/augment.md`.
 
 ## Amp
-- Web settings page (`https://ampcode.com/settings`) via browser cookies.
-- Parses Amp Free usage from the settings HTML.
+- Auto mode tries the local `amp usage` command first.
+- API mode calls Amp's balance endpoint with an access token.
+- Web fallback reads the legacy settings page with browser cookies.
+- Tracks Amp Free usage, account identity, and individual and workspace credit balances.
 - Status: none yet.
 - Details: `docs/amp.md`.
 
@@ -378,6 +382,13 @@ headers, source selection, provider ordering, and token accounts are stored in `
 - Optional project ID from provider settings or `DEEPGRAM_PROJECT_ID`; otherwise aggregates all visible projects.
 - Reads Deepgram usage breakdowns for audio hours, agent hours, token totals, TTS characters, and requests.
 - Details: `docs/deepgram.md`.
+
+## LiteLLM
+- API key from config or `LITELLM_API_KEY`; base URL from config `enterpriseHost` or `LITELLM_BASE_URL`.
+- Reads `/key/info` first to discover the `user_id`, then `/user/info?user_id=...` for personal spend and budget.
+- Shows personal budget usage as the primary window and the first matching team budget as the secondary window.
+- Accepts base URLs with or without a `/v1` suffix; management requests are sent to the proxy root.
+- Details: `docs/litellm.md`.
 
 ## StepFun
 - Username/password login or manual Oasis-Token.

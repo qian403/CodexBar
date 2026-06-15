@@ -305,10 +305,29 @@ extension SettingsStore {
     /// users see no change.
     var dashboardSidebarDisplay: DashboardSidebarDisplay {
         get { DashboardSidebarDisplay(rawValue: self.dashboardSidebarDisplayRaw ?? "") ?? .tokens }
-        set { self.dashboardSidebarDisplayRaw = newValue.rawValue }
-    }
-
-    var costUsageEnabled: Bool {
+         set { self.dashboardSidebarDisplayRaw = newValue.rawValue }
+     }
+ 
+     var copilotIconSecondaryWindowIDRaw: String {
+         get { self.defaultsState.copilotIconSecondaryWindowIDRaw }
+         set {
+             self.defaultsState.copilotIconSecondaryWindowIDRaw = newValue
+             self.userDefaults.set(newValue, forKey: "copilotIconSecondaryWindowID")
+         }
+     }
+ 
+     var copilotBudgetExtrasEnabled: Bool {
+         get { self.defaultsState.copilotBudgetExtrasEnabled }
+         set {
+             self.defaultsState.copilotBudgetExtrasEnabled = newValue
+             self.userDefaults.set(newValue, forKey: "copilotBudgetExtrasEnabled")
+             CodexBarLog.logger(LogCategories.settings).info(
+                 "Copilot budget extras updated",
+                 metadata: ["enabled": newValue ? "1" : "0"])
+         }
+     }
+ 
+     var costUsageEnabled: Bool {
         get { self.defaultsState.costUsageEnabled }
         set {
             self.defaultsState.costUsageEnabled = newValue

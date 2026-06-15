@@ -29,7 +29,7 @@ extension StatusItemController {
         submenuIndicatorTopPadding: CGFloat = 8,
         onClick: (() -> Void)? = nil) -> NSMenuItem
     {
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let item = NSMenuItem()
             item.isEnabled = true
             item.representedObject = id
@@ -50,7 +50,8 @@ extension StatusItemController {
                 highlightState: recycled.highlightState,
                 showsSubmenuIndicator: submenu != nil,
                 submenuIndicatorAlignment: submenuIndicatorAlignment,
-                submenuIndicatorTopPadding: submenuIndicatorTopPadding)
+                submenuIndicatorTopPadding: submenuIndicatorTopPadding,
+                refreshMonitor: self.menuCardRefreshMonitor)
             {
                 view
             }
@@ -62,7 +63,8 @@ extension StatusItemController {
                 highlightState: highlightState,
                 showsSubmenuIndicator: submenu != nil,
                 submenuIndicatorAlignment: submenuIndicatorAlignment,
-                submenuIndicatorTopPadding: submenuIndicatorTopPadding)
+                submenuIndicatorTopPadding: submenuIndicatorTopPadding,
+                refreshMonitor: self.menuCardRefreshMonitor)
             {
                 view
             }

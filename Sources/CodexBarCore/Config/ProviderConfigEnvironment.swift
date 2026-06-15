@@ -15,14 +15,17 @@ public enum ProviderConfigEnvironment {
         if provider == .deepgram {
             return self.applyDeepgramOverrides(base: base, config: config)
         }
-        if provider == .llmproxy {
-            return self.applyLLMProxyOverrides(base: base, config: config)
+        if self.supportsAPIKeyAndBaseURLOverride(provider) {
+            return self.applyAPIKeyAndBaseURLOverrides(base: base, provider: provider, config: config)
         }
         if provider.isCustom {
             return self.applyCustomOverrides(provider: provider, base: base, config: config)
         }
         if provider == .azureopenai {
             return self.applyAzureOpenAIOverrides(base: base, config: config)
+        }
+        if provider == .kimi {
+            return self.applyKimiOverrides(base: base, config: config)
         }
         guard let apiKey = config?.sanitizedAPIKey, !apiKey.isEmpty else { return base }
         var env = base
@@ -77,8 +80,25 @@ public enum ProviderConfigEnvironment {
         }
     }
 
+    private static func baseURLEnvironmentKey(for provider: UsageProvider) -> String? {
+        switch provider {
+        case .llmproxy:
+            LLMProxySettingsReader.baseURLEnvironmentKey
+        case .litellm:
+            LiteLLMSettingsReader.baseURLEnvironmentKey
+        default:
+            nil
+        }
+    }
+
+    private static func supportsAPIKeyAndBaseURLOverride(_ provider: UsageProvider) -> Bool {
+        self.baseURLEnvironmentKey(for: provider) != nil
+    }
+
     private static func directAPIKeyEnvironmentKey(for provider: UsageProvider) -> String? {
         switch provider {
+        case .amp:
+            AmpSettingsReader.apiTokenKey
         case .openai:
             OpenAIAPISettingsReader.adminAPIKeyEnvironmentKey
         case .azureopenai:
@@ -101,6 +121,8 @@ public enum ProviderConfigEnvironment {
             ElevenLabsSettingsReader.apiKeyEnvironmentKey
         case .moonshot:
             MoonshotSettingsReader.apiKeyEnvironmentKeys.first
+        case .kimi:
+            KimiSettingsReader.apiKeyEnvironmentKeys.first
         case .ollama:
             OllamaAPISettingsReader.apiKeyEnvironmentKeys.first
         case .venice:
@@ -111,6 +133,8 @@ public enum ProviderConfigEnvironment {
             GroqSettingsReader.apiKeyEnvironmentKey
         case .llmproxy:
             LLMProxySettingsReader.apiKeyEnvironmentKey
+        case .litellm:
+            LiteLLMSettingsReader.apiKeyEnvironmentKey
         default:
             nil
         }
@@ -207,16 +231,38 @@ public enum ProviderConfigEnvironment {
         return env
     }
 
-    private static func applyLLMProxyOverrides(
+    private static func applyAPIKeyAndBaseURLOverrides(
         base: [String: String],
+        provider: UsageProvider,
         config: ProviderConfig?) -> [String: String]
     {
         var env = base
-        if let apiKey = config?.sanitizedAPIKey {
-            env[LLMProxySettingsReader.apiKeyEnvironmentKey] = apiKey
+        if let apiKey = config?.sanitizedAPIKey,
+           let key = self.directAPIKeyEnvironmentKey(for: provider)
+        {
+            env[key] = apiKey
         }
-        if let baseURL = config?.sanitizedEnterpriseHost {
-            env[LLMProxySettingsReader.baseURLEnvironmentKey] = baseURL
+        if let baseURL = config?.sanitizedEnterpriseHost,
+           let key = self.baseURLEnvironmentKey(for: provider)
+        {
+            env[key] = baseURL
+        }
+        return env
+    }
+
+    private static func applyKimiOverrides(
+        base: [String: String],
+        config: ProviderConfig?) -> [String: String]
+    {
+        guard let config else { return base }
+        var env = base
+        if let apiKey = config.sanitizedAPIKey,
+           let key = KimiSettingsReader.apiKeyEnvironmentKeys.first
+        {
+            env[key] = apiKey
+        }
+        if let baseURL = config.sanitizedEnterpriseHost {
+            env[KimiSettingsReader.codeAPIBaseURLEnvironmentKey] = baseURL
         }
         return env
     }

@@ -101,6 +101,7 @@ public enum ProviderDescriptorRegistry {
         .grok: GrokProviderDescriptor.descriptor,
         .groq: GroqProviderDescriptor.descriptor,
         .llmproxy: LLMProxyProviderDescriptor.descriptor,
+        .litellm: LiteLLMProviderDescriptor.descriptor,
         .deepgram: DeepgramProviderDescriptor.descriptor,
         .custom: CustomProviderDescriptors.descriptor(for: .custom),
         .custom2: CustomProviderDescriptors.descriptor(for: .custom2),
