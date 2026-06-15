@@ -9,8 +9,10 @@ extension UsageStore {
         var highest: (provider: UsageProvider, usedPercent: Double)?
         for provider in self.enabledProviders() {
             guard let snapshot = self.snapshots[provider] else { continue }
-            let window = self.menuBarMetricWindowForHighestUsage(provider: provider, snapshot: snapshot)
-            let percent = window?.usedPercent ?? 0
+            guard let window = self.menuBarMetricWindowForHighestUsage(provider: provider, snapshot: snapshot) else {
+                continue
+            }
+            let percent = window.usedPercent
             guard !self.shouldExcludeFromHighestUsage(
                 provider: provider,
                 snapshot: snapshot,
@@ -49,28 +51,40 @@ extension UsageStore {
             // In automatic mode Copilot can have one depleted lane while another still has quota.
             return primary.usedPercent >= 100 && secondary.usedPercent >= 100
         }
-        if provider == .cursor,
+        if provider == .cursor || provider == .antigravity,
            effectivePreference == .automatic
         {
+            if provider == .antigravity,
+               let percents = Self.antigravityQuotaSummaryUsedPercents(snapshot: snapshot),
+               !percents.isEmpty
+            {
+                return percents.allSatisfy { $0 >= 100 }
+            }
             let percents = [
                 snapshot.primary?.usedPercent,
                 snapshot.secondary?.usedPercent,
                 snapshot.tertiary?.usedPercent,
-            ].compactMap(\.self)
+            ].compactMap(\.self) + (provider == .antigravity
+                ? Self.antigravityLegacyExtraUsedPercents(snapshot: snapshot)
+                : [])
             guard !percents.isEmpty else { return true }
             return percents.allSatisfy { $0 >= 100 }
         }
-        if provider == .antigravity,
-           effectivePreference == .automatic
-        {
-            let percents = [
-                snapshot.primary?.usedPercent,
-                snapshot.secondary?.usedPercent,
-                snapshot.tertiary?.usedPercent,
-            ].compactMap(\.self)
-            guard !percents.isEmpty else { return true }
-            return percents.allSatisfy { $0 >= 100 }
-        }
+
         return true
+    }
+
+    private nonisolated static let antigravityQuotaSummaryWindowIDPrefix = "antigravity-quota-summary-"
+
+    private nonisolated static func antigravityQuotaSummaryUsedPercents(snapshot: UsageSnapshot) -> [Double]? {
+        snapshot.extraRateWindows?
+            .filter { $0.usageKnown && $0.id.hasPrefix(Self.antigravityQuotaSummaryWindowIDPrefix) }
+            .map(\.window.usedPercent)
+    }
+
+    private nonisolated static func antigravityLegacyExtraUsedPercents(snapshot: UsageSnapshot) -> [Double] {
+        snapshot.extraRateWindows?
+            .filter { $0.usageKnown && !$0.id.hasPrefix(Self.antigravityQuotaSummaryWindowIDPrefix) }
+            .map(\.window.usedPercent) ?? []
     }
 }

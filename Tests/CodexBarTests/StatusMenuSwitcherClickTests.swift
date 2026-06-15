@@ -747,7 +747,7 @@ struct StatusMenuSwitcherClickTests {
     }
 
     @Test
-    func `switcher quota indicator disappears when remaining becomes unavailable`() throws {
+    func `switcher keeps stable height when remaining becomes unavailable`() throws {
         var grokRemaining: Double? = 50
         let noQuotaView = ProviderSwitcherView(
             providers: [.claude, .grok],
@@ -779,7 +779,7 @@ struct StatusMenuSwitcherClickTests {
         #expect(view._test_quotaIndicatorFillRatios().count == 2)
         let noQuotaHeight = try #require(noQuotaView._test_buttonFittingSizes().last?.height)
         let quotaHeight = try #require(view._test_buttonFittingSizes().last?.height)
-        #expect(quotaHeight > noQuotaHeight)
+        #expect(quotaHeight == noQuotaHeight)
 
         grokRemaining = nil
         view.updateQuotaIndicators()
@@ -790,7 +790,7 @@ struct StatusMenuSwitcherClickTests {
     }
 
     @Test
-    func `text only switcher quota bars reserve title space`() throws {
+    func `text only switcher keeps stable height with quota bars`() throws {
         let providers: [UsageProvider] = [.claude, .grok]
         let textOnlyWithoutQuota = ProviderSwitcherView(
             providers: providers,
@@ -813,7 +813,7 @@ struct StatusMenuSwitcherClickTests {
 
         let withoutQuotaHeight = try #require(textOnlyWithoutQuota._test_buttonFittingSizes().first?.height)
         let withQuotaHeight = try #require(textOnlyWithQuota._test_buttonFittingSizes().first?.height)
-        #expect(withQuotaHeight > withoutQuotaHeight)
+        #expect(withQuotaHeight == withoutQuotaHeight)
     }
 
     @Test
@@ -895,13 +895,21 @@ struct StatusMenuSwitcherClickTests {
         view.layoutSubtreeIfNeeded()
 
         // All buttons must stay within switcher bounds (no vertical overflow).
-        for frame in view._test_buttonFrames() {
+        let buttonFrames = view._test_buttonFrames()
+        let contentFrames = view._test_buttonContentFrames()
+        let trackFrames = view._test_quotaIndicatorTrackFrames()
+        for (frame, contentFrame) in zip(buttonFrames, contentFrames) {
             #expect(frame.minY >= 0)
             #expect(frame.maxY <= view.bounds.maxY)
+            #expect(abs((contentFrame?.midY ?? -1) - frame.height / 2) <= 0.5)
+        }
+        for (buttonFrame, trackFrame) in zip(buttonFrames.dropFirst(), trackFrames) {
+            #expect(trackFrame.minY >= buttonFrame.minY)
+            #expect(trackFrame.maxY <= buttonFrame.maxY)
         }
 
         #expect(view._test_rowCount() == 4)
-        #expect(view._test_rowHeight() == 44)
-        #expect(view.bounds.height == 188)
+        #expect(view._test_rowHeight() == 39)
+        #expect(view.bounds.height == 168)
     }
 }

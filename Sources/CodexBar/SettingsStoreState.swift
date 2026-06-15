@@ -30,6 +30,8 @@ struct SettingsDefaultsState {
     var multiAccountMenuLayoutRaw: String
     var menuBarMetricPreferencesRaw: [String: String]
     var dashboardSidebarDisplayRaw: String?
+    var copilotBudgetExtrasEnabled: Bool
+    var copilotIconSecondaryWindowIDRaw: String
     var costUsageEnabled: Bool
     var costUsageHistoryDays: Int
     var hidePersonalInfo: Bool

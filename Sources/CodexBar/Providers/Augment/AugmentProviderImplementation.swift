@@ -1,10 +1,8 @@
 import AppKit
 import CodexBarCore
-import CodexBarMacroSupport
 import Foundation
 import SwiftUI
 
-@ProviderImplementationRegistration
 struct AugmentProviderImplementation: ProviderImplementation {
     let id: UsageProvider = .augment
 
@@ -68,7 +66,7 @@ struct AugmentProviderImplementation: ProviderImplementation {
                 isVisible: nil,
                 onChange: nil,
                 trailingText: {
-                    guard let entry = CookieHeaderCache.load(provider: .augment) else { return nil }
+                    guard let entry = CookieHeaderCache.loadForDisplay(provider: .augment) else { return nil }
                     let when = entry.storedAt.relativeDescription()
                     return "Cached: \(entry.sourceLabel) • \(when)"
                 }),

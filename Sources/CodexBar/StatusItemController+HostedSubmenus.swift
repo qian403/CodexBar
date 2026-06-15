@@ -62,6 +62,8 @@ extension StatusItemController {
         menu.removeAllItems()
 
         let t0 = CACurrentMediaTime()
+        MainThreadActivityBreadcrumb.push("hydrateChart:\(chartID)")
+        defer { MainThreadActivityBreadcrumb.pop() }
         let didHydrate: Bool = switch chartID {
         case Self.usageBreakdownChartID:
             self.appendUsageBreakdownChartItem(to: menu, width: width)
@@ -130,6 +132,8 @@ extension StatusItemController {
 
         menu.removeAllItems()
         let t0 = CACurrentMediaTime()
+        MainThreadActivityBreadcrumb.push("refreshChart:\(identity.chartID)")
+        defer { MainThreadActivityBreadcrumb.pop() }
         let didHydrate: Bool = switch identity.chartID {
         case Self.usageBreakdownChartID:
             self.appendUsageBreakdownChartItem(to: menu, width: width)
@@ -315,7 +319,7 @@ extension StatusItemController {
             from: self.store.openAIDashboard?.usageBreakdown ?? [])
         guard !breakdown.isEmpty else { return false }
 
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let chartItem = NSMenuItem()
             chartItem.isEnabled = true
             chartItem.representedObject = Self.usageBreakdownChartID
@@ -342,7 +346,7 @@ extension StatusItemController {
         let breakdown = self.store.openAIDashboard?.dailyBreakdown ?? []
         guard !breakdown.isEmpty else { return false }
 
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let chartItem = NSMenuItem()
             chartItem.isEnabled = true
             chartItem.representedObject = Self.creditsHistoryChartID
@@ -373,7 +377,7 @@ extension StatusItemController {
         guard let tokenSnapshot = self.tokenSnapshotForCostHistorySubmenu(provider: provider) else { return false }
         guard !tokenSnapshot.daily.isEmpty else { return false }
 
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let chartItem = NSMenuItem()
             chartItem.isEnabled = true
             chartItem.representedObject = Self.costHistoryChartID
@@ -415,7 +419,7 @@ extension StatusItemController {
               !footprint.components.isEmpty
         else { return false }
 
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let item = NSMenuItem()
             item.isEnabled = true
             item.representedObject = Self.storageBreakdownID
@@ -456,7 +460,7 @@ extension StatusItemController {
               let modelUsage = snapshot.zaiUsage?.modelUsage
         else { return false }
 
-        if !Self.menuCardRenderingEnabled {
+        if !self.menuCardRenderingEnabledForController {
             let chartItem = NSMenuItem()
             chartItem.isEnabled = false
             chartItem.representedObject = Self.zaiHourlyUsageChartID

@@ -6,14 +6,6 @@ import Testing
 @Suite(.serialized)
 @MainActor
 struct StatusItemBalanceDisplayTests {
-    private func makeStatusBarForTesting() -> NSStatusBar {
-        let env = ProcessInfo.processInfo.environment
-        if env["GITHUB_ACTIONS"] == "true" || env["CI"] == "true" {
-            return .system
-        }
-        return NSStatusBar()
-    }
-
     @Test
     func `menu bar display text uses open router balance`() {
         let settings = self.makeSettings(
@@ -21,6 +13,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .openrouter)
         settings.setMenuBarMetricPreference(.automatic, for: .openrouter)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.openRouterSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .openrouter)
@@ -32,12 +25,58 @@ struct StatusItemBalanceDisplayTests {
     }
 
     @Test
+    func `reset time mode preserves automatic open router balance`() {
+        let settings = self.makeSettings(
+            suiteName: "StatusItemBalanceDisplayTests-openrouter-reset-time",
+            provider: .openrouter)
+        settings.menuBarDisplayMode = .resetTime
+        settings.setMenuBarMetricPreference(.automatic, for: .openrouter)
+        let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
+        let snapshot = Self.openRouterSnapshot()
+
+        store._setSnapshotForTesting(snapshot, provider: .openrouter)
+        store._setErrorForTesting(nil, provider: .openrouter)
+
+        let displayText = controller.menuBarDisplayText(for: .openrouter, snapshot: snapshot)
+
+        #expect(displayText == "$12.34")
+    }
+
+    @Test
+    func `reset time mode preserves balance when provider has no quota window`() {
+        let settings = self.makeSettings(
+            suiteName: "StatusItemBalanceDisplayTests-moonshot-reset-time",
+            provider: .moonshot)
+        settings.menuBarDisplayMode = .resetTime
+        let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
+        let snapshot = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            updatedAt: Date(),
+            identity: ProviderIdentitySnapshot(
+                providerID: .moonshot,
+                accountEmail: nil,
+                accountOrganization: nil,
+                loginMethod: "Balance: $49.58 · $0.42 in deficit"))
+
+        store._setSnapshotForTesting(snapshot, provider: .moonshot)
+        store._setErrorForTesting(nil, provider: .moonshot)
+
+        let displayText = controller.menuBarDisplayText(for: .moonshot, snapshot: snapshot)
+
+        #expect(displayText == "$49.58")
+    }
+
+    @Test
     func `menu bar display text respects open router primary metric preference`() {
         let settings = self.makeSettings(
             suiteName: "StatusItemBalanceDisplayTests-openrouter-primary-metric",
             provider: .openrouter)
         settings.setMenuBarMetricPreference(.primary, for: .openrouter)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.openRouterSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .openrouter)
@@ -54,6 +93,7 @@ struct StatusItemBalanceDisplayTests {
             suiteName: "StatusItemBalanceDisplayTests-deepseek-balance",
             provider: .deepseek)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = UsageSnapshot(
             primary: RateWindow(
                 usedPercent: 0,
@@ -72,11 +112,61 @@ struct StatusItemBalanceDisplayTests {
     }
 
     @Test
+    func `menu bar display text uses mimo balance without token plan`() {
+        let settings = self.makeSettings(
+            suiteName: "StatusItemBalanceDisplayTests-mimo-balance",
+            provider: .mimo)
+        let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
+        let snapshot = MiMoUsageSnapshot(
+            balance: 25.51,
+            currency: "USD",
+            cashBalance: 20,
+            giftBalance: 5.51,
+            updatedAt: Date())
+            .toUsageSnapshot()
+
+        store._setSnapshotForTesting(snapshot, provider: .mimo)
+        store._setErrorForTesting(nil, provider: .mimo)
+
+        let displayText = controller.menuBarDisplayText(for: .mimo, snapshot: snapshot)
+
+        #expect(displayText == "$25.51")
+    }
+
+    @Test
+    func `menu bar display text uses selected mimo balance with token plan`() {
+        let settings = self.makeSettings(
+            suiteName: "StatusItemBalanceDisplayTests-mimo-token-plan",
+            provider: .mimo)
+        settings.setMenuBarMetricPreference(.secondary, for: .mimo)
+        let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
+        let snapshot = MiMoUsageSnapshot(
+            balance: 25.51,
+            currency: "USD",
+            planCode: "standard",
+            tokenUsed: 10,
+            tokenLimit: 100,
+            tokenPercent: 0.1,
+            updatedAt: Date())
+            .toUsageSnapshot()
+
+        store._setSnapshotForTesting(snapshot, provider: .mimo)
+        store._setErrorForTesting(nil, provider: .mimo)
+
+        let displayText = controller.menuBarDisplayText(for: .mimo, snapshot: snapshot)
+
+        #expect(displayText == "$25.51")
+    }
+
+    @Test
     func `menu bar display text uses moonshot balance`() {
         let settings = self.makeSettings(
             suiteName: "StatusItemBalanceDisplayTests-moonshot-balance",
             provider: .moonshot)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = UsageSnapshot(
             primary: nil,
             secondary: nil,
@@ -102,6 +192,7 @@ struct StatusItemBalanceDisplayTests {
             suiteName: "StatusItemBalanceDisplayTests-mistral-spend",
             provider: .mistral)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = MistralUsageSnapshot(
             totalCost: 1.2345,
             currency: "EUR",
@@ -130,6 +221,7 @@ struct StatusItemBalanceDisplayTests {
             suiteName: "StatusItemBalanceDisplayTests-kimik2-credits",
             provider: .kimik2)
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = KimiK2UsageSummary(
             consumed: 75,
             remaining: 1234.5,
@@ -153,6 +245,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .automatic
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.kiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -170,6 +263,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .creditsAndPercent
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.kiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -187,6 +281,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .hidden
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.kiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -204,6 +299,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .usedAndTotal
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.kiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -221,6 +317,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .overageCreditsWhenExhausted
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.exhaustedKiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -238,6 +335,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .overageCostWhenExhausted
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.exhaustedKiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -255,6 +353,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .overageCreditsAndCostWhenExhausted
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.exhaustedKiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -272,6 +371,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .overageCreditsAndCostWhenExhausted
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.kiroSnapshot()
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -289,6 +389,7 @@ struct StatusItemBalanceDisplayTests {
             provider: .kiro)
         settings.kiroMenuBarDisplayMode = .overageCreditsAndCostWhenExhausted
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = Self.exhaustedKiroSnapshot(overagesStatus: "Disabled")
 
         store._setSnapshotForTesting(snapshot, provider: .kiro)
@@ -307,6 +408,7 @@ struct StatusItemBalanceDisplayTests {
         settings.kiroMenuBarDisplayMode = .automatic
         settings.usageBarsShowUsed = false
         let (store, controller) = self.makeStoreAndController(settings: settings)
+        defer { controller.releaseStatusItemsForTesting() }
         let snapshot = KiroUsageSnapshot(
             planName: "Q Developer Pro",
             creditsUsed: 0,
@@ -354,10 +456,7 @@ struct StatusItemBalanceDisplayTests {
     }
 
     private func makeSettings(suiteName: String, provider: UsageProvider) -> SettingsStore {
-        let settings = SettingsStore(
-            configStore: testConfigStore(suiteName: suiteName),
-            zaiTokenStore: NoopZaiTokenStore(),
-            syntheticTokenStore: NoopSyntheticTokenStore())
+        let settings = testSettingsStore(suiteName: suiteName)
         settings.statusChecksEnabled = false
         settings.refreshFrequency = .manual
         settings.mergeIcons = true
@@ -381,7 +480,7 @@ struct StatusItemBalanceDisplayTests {
             account: fetcher.loadAccountInfo(),
             updater: DisabledUpdaterController(),
             preferencesSelection: PreferencesSelection(),
-            statusBar: self.makeStatusBarForTesting())
+            statusBar: testStatusBar())
         return (store, controller)
     }
 

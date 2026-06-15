@@ -3,6 +3,18 @@ import Testing
 
 struct ProviderConfigEnvironmentTests {
     @Test
+    func `applies API key override for amp`() {
+        let config = ProviderConfig(id: .amp, apiKey: "sgamp-config")
+        let env = ProviderConfigEnvironment.applyAPIKeyOverride(
+            base: [:],
+            provider: .amp,
+            config: config)
+
+        #expect(env[AmpSettingsReader.apiTokenKey] == "sgamp-config")
+        #expect(ProviderTokenResolver.ampToken(environment: env) == "sgamp-config")
+    }
+
+    @Test
     func `applies API key override for zai`() {
         let config = ProviderConfig(id: .zai, apiKey: "z-token")
         let env = ProviderConfigEnvironment.applyAPIKeyOverride(
@@ -51,6 +63,7 @@ struct ProviderConfigEnvironmentTests {
         #expect(ProviderTokenResolver.doubaoToken(environment: env) == "db-token")
     }
 
+    @Test
     func `applies API key override for moonshot`() {
         let config = ProviderConfig(id: .moonshot, apiKey: "moon-token")
         let env = ProviderConfigEnvironment.applyAPIKeyOverride(
@@ -63,6 +76,25 @@ struct ProviderConfigEnvironmentTests {
         guard let key else { return }
 
         #expect(env[key] == "moon-token")
+    }
+
+    @Test
+    func `applies Kimi API key and base URL config overrides`() throws {
+        let config = ProviderConfig(
+            id: .kimi,
+            apiKey: "kimi-api-token",
+            enterpriseHost: "https://proxy.example.com/kimi")
+        let env = ProviderConfigEnvironment.applyProviderConfigOverrides(
+            base: [:],
+            provider: .kimi,
+            config: config)
+
+        #expect(env["KIMI_CODE_API_KEY"] == "kimi-api-token")
+        #expect(env["KIMI_API_KEY"] == nil)
+        #expect(env[KimiSettingsReader.codeAPIBaseURLEnvironmentKey] == "https://proxy.example.com/kimi")
+        #expect(ProviderTokenResolver.kimiAPIToken(environment: env) == "kimi-api-token")
+        #expect(try KimiSettingsReader.codeAPIBaseURL(environment: env).absoluteString ==
+            "https://proxy.example.com/kimi")
     }
 
     @Test
@@ -103,6 +135,22 @@ struct ProviderConfigEnvironmentTests {
         #expect(env[LLMProxySettingsReader.apiKeyEnvironmentKey] == "proxy-token")
         #expect(env[LLMProxySettingsReader.baseURLEnvironmentKey] == "https://proxy.example.com")
         #expect(ProviderTokenResolver.llmProxyToken(environment: env) == "proxy-token")
+    }
+
+    @Test
+    func `applies LiteLLM config overrides`() {
+        let config = ProviderConfig(
+            id: .litellm,
+            apiKey: "litellm-token",
+            enterpriseHost: "https://litellm.example.com/v1")
+        let env = ProviderConfigEnvironment.applyProviderConfigOverrides(
+            base: [:],
+            provider: .litellm,
+            config: config)
+
+        #expect(env[LiteLLMSettingsReader.apiKeyEnvironmentKey] == "litellm-token")
+        #expect(env[LiteLLMSettingsReader.baseURLEnvironmentKey] == "https://litellm.example.com/v1")
+        #expect(ProviderTokenResolver.liteLLMToken(environment: env) == "litellm-token")
     }
 
     @Test
