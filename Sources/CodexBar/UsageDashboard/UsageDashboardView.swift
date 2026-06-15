@@ -1091,16 +1091,20 @@ extension UsageDashboardView {
         }
     }
 
-    /// Today's token total for `provider`, when a daily token snapshot
-    /// exists. Matches the legacy `.tokens` value that pre-dated the
-    /// setting.
+    /// Today's token total for `provider`. When a daily token snapshot
+    /// exists for today we show the count; otherwise we fall back to the
+    /// provider's primary-window used percent (matches the legacy
+    /// `sidebarValue(for:)` behavior that pre-dated the `.tokens` /
+    /// `.percent` setting toggle).
     private func tokensValue(for provider: UsageProvider) -> String {
         if let daily = self.store.tokenSnapshot(for: provider)?.daily, !daily.isEmpty {
             let todayKey = UsageHeatmapData.dayKey(for: Date(), calendar: .current)
             if let entry = daily.first(where: { $0.date == todayKey }) {
                 return UsageFormatter.tokenCountString(entry.totalTokens ?? 0)
             }
-            return "—"
+        }
+        if let window = self.store.snapshot(for: provider)?.primary {
+            return String(format: "%.0f%%", min(100, max(0, window.usedPercent)))
         }
         return "—"
     }
