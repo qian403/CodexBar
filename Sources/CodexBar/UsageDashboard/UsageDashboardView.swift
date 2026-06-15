@@ -714,14 +714,6 @@ extension UsageDashboardView {
 
     // MARK: Trend & forecast
 
-    private struct TrendPoint: Identifiable {
-        let date: Date
-        let value: Double
-        var id: TimeInterval {
-            self.date.timeIntervalSince1970
-        }
-    }
-
     /// Whether the trend plots cost (when any spend is recorded) or falls back to tokens.
     private var trendUsesCost: Bool {
         self.cachedHeatmap.stats(within: .allTime).costUSD > 0
@@ -749,38 +741,16 @@ extension UsageDashboardView {
                             .foregroundStyle(.secondary)
                     }
                 }
-                Chart(points) { point in
-                    AreaMark(
-                        x: .value("Date", point.date, unit: .day),
-                        y: .value("Value", point.value))
-                        .foregroundStyle(self.selectionColor.opacity(0.15))
-                    LineMark(
-                        x: .value("Date", point.date, unit: .day),
-                        y: .value("Value", point.value))
-                        .foregroundStyle(self.selectionColor)
-                        .interpolationMethod(.monotone)
-                }
-                .chartYAxis {
-                    AxisMarks(position: .leading) { value in
-                        AxisGridLine().foregroundStyle(Color.primary.opacity(0.05))
-                        AxisValueLabel {
-                            if let number = value.as(Double.self) {
-                                Text(self.trendAxisLabel(number))
-                                    .font(.system(size: 9))
-                                    .foregroundStyle(.tertiary)
-                            }
-                        }
-                    }
-                }
-                .chartXAxis {
-                    AxisMarks(values: .stride(by: .month)) { _ in
-                        AxisGridLine().foregroundStyle(Color.clear)
-                        AxisValueLabel(format: .dateTime.month(.abbreviated))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
-                .frame(height: 110)
+                TrendChart(
+                    points: points,
+                    usesCost: self.trendUsesCost,
+                    costString: { self.costString($0) },
+                    selectionColor: self.selectionColor,
+                    selectedDayKey: self.$selectedDayKey,
+                    lookupDay: { date in
+                        let key = UsageHeatmapData.dayKey(for: date, calendar: .current)
+                        return self.cachedHeatmap.daysByKey[key]
+                    })
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
