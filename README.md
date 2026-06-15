@@ -11,6 +11,67 @@
 
 <a href="https://codexbar.app"><img src="docs/social.png" alt="CodexBar — every AI coding limit in your menu bar. 40+ providers." width="100%" /></a>
 
+## About this fork
+
+This is a personal fork of [steipete/CodexBar](https://github.com/steipete/CodexBar) maintained at
+[qian403/CodexBar](https://github.com/qian403/CodexBar). It keeps the upstream app fully functional
+and layers on a small set of OpenCode-focused and dashboard-quality-of-life improvements — see
+[Changelog](#changelog). Everything else (install paths, supported providers, release artifacts)
+remains identical to upstream; if you don't need the additions below, prefer the official
+[steipete/CodexBar](https://github.com/steipete/CodexBar) release.
+
+### Building from source (this fork)
+
+```bash
+git clone https://github.com/qian403/CodexBar.git
+cd CodexBar
+swift build -j 2
+swift test  -j 2
+
+# Bundle a runnable .app into ./CodexBar.app (ad-hoc signed, debug build):
+CODEXBAR_SIGNING=adhoc ./Scripts/package_app.sh debug
+# If the final `codesign` step complains about "resource fork / Finder
+# information / similar detritus", strip the AppleDouble files and re-sign:
+xattr -cr .build/package/CodexBar.app
+find .build/package/CodexBar.app -name "._*" -print -delete
+codesign --force --deep --sign - .build/package/CodexBar.app
+mv .build/package/CodexBar.app CodexBar.app
+open -n CodexBar.app
+```
+
+> Note: the local ad-hoc build uses bundle id `com.steipete.codexbar.debug`, so the first time
+> each provider's keychain item is read macOS will prompt to grant access. Click "Always Allow"
+> once per item and you won't be asked again.
+
+### Changelog (this fork only — relative to upstream `main`)
+
+- **OpenCode token stats (v1)** — read the local `~/.local/share/opencode/opencode.db` `message`
+  table and aggregate per-day token / cost / request counts, mirroring ccswitch's
+  `session_usage_opencode.rs` so the numbers match what ccswitch shows.
+- **OpenCode per-request log** — new "Recent requests" section in the usage dashboard listing the
+  most recent finished assistant messages, with model, cost, and per-message token breakdown.
+- **OpenCode WAL cache (v2)** — mtime-based cache for the SQLite scan that keys on
+  `max(opencode.db mtime, opencode.db-wal mtime)` so writes that haven't been checkpointed yet
+  still trigger a rescan, with a `dailyReport` + `type` discriminator so partial-decoder paths
+  decode the cached payload without silent zero-entry bugs.
+- **OpenCode Go** — `OpenCodeGoProviderDescriptor.tokenCost.supportsTokenCost` flipped to `true`
+  so the sidebar / dashboard see the same `opencode.db` data for OpenCode Go as for plain OpenCode.
+- **Dashboard sidebar toggle** — new "Sidebar value" picker in *Settings → Display* to choose
+  between today's token count (default, preserves the pre-toggle behavior) and the primary-window
+  used percent. When the provider has no daily snapshot, both modes fall back to the primary
+  window so the row never reads `—` for a provider that does have live limits.
+- **Menu rename** — "Usage Heatmap…" → "Usage Dashboard…" (en + zh-Hant) to match the
+  extended analytics the window now shows.
+- **Interactive cost trend chart** — hover the chart to see a floating tooltip with the day's
+  date, cost / tokens, request count, and the top 3 model breakdown (cost-sorted). Hovering
+  also drives the day-detail section below the chart, so the chart itself is now the primary
+  way to drill into a specific day.
+- **Heatmap selection border fix** — the "selected day" stroke is now inset to stay inside the
+  cell, so the top-left corner of first-row / first-column cells no longer gets clipped by the
+  Canvas.
+
+
+
 Tiny macOS 14+ menu bar app that keeps **AI coding-provider limits visible** and shows when each window resets. Codex, OpenAI, Claude, Cursor, Gemini, Copilot, Grok, GroqCloud, ElevenLabs, Deepgram, z.ai, MiniMax, Kiro, Vertex AI, Augment, OpenRouter, LLM Proxy, Codebuff, Command Code, AWS Bedrock, and many newer coding providers. One status item per provider, or Merge Icons mode with a provider switcher. No Dock icon, minimal UI, dynamic bar icons.
 
 <img src="codexbar.png" alt="CodexBar menu popover with provider tiles, usage bars, and reset countdowns" width="520" />
@@ -229,7 +290,20 @@ CLI install:
 - [showy-quota](https://github.com/enieuwy/showy-quota) — always-on AI plan quota strips for SketchyBar, tmux, and Zellij (standalone WASM plugin), built on `codexbar serve` / the bundled CLI.
 
 ## Credits
-Inspired by [ccusage](https://github.com/ryoppippi/ccusage) (MIT), specifically the cost usage tracking.
+
+This project is a fork of [CodexBar](https://github.com/steipete/CodexBar) by
+[Peter Steinberger](https://twitter.com/steipete) (MIT). All credit for the original macOS
+menu-bar app, the provider integrations, the design, and the build / signing / notarization
+pipeline goes to the upstream project and its contributors. Please support the original
+project: ⭐ the repo, file issues upstream for general bugs, and consider sponsoring the author
+before filing feature requests here that also apply to the base app.
+
+Additional credit:
+
+- [cc-switch](https://github.com/farion1231/cc-switch) (MIT) — the OpenCode session-usage
+  reader logic that the OpenCode token stats / per-request log in this fork is based on.
+- Inspired by [ccusage](https://github.com/ryoppippi/ccusage) (MIT), specifically the cost
+  usage tracking (upstream credit).
 
 ## License
 MIT • Peter Steinberger ([steipete](https://twitter.com/steipete))
