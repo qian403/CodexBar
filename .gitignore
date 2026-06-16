@@ -38,6 +38,9 @@ debug_*.swift
 .tmp-clang/
 __pycache__/
 
+# AI tooling scratch state
+.yolo.json
+
 # Debug/analysis docs
 docs/*-analysis.md
 docs/.astro/
