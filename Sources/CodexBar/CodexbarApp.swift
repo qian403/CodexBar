@@ -107,6 +107,12 @@ struct CodexBarApp: App {
         }
         .defaultSize(width: 900, height: 600)
         .windowResizability(.contentMinSize)
+
+        Window(L("OpenCode requests"), id: OpenCodeRequestLogWindow.id) {
+            OpenCodeRequestLogWindowHost(store: self.store)
+        }
+        .defaultSize(width: 720, height: 480)
+        .windowResizability(.contentMinSize)
     }
 
     private func openSettings(tab: PreferencesTab) {

@@ -8,6 +8,10 @@ enum UsageDashboardWindow {
     static let id = "usageWindow"
 }
 
+enum OpenCodeRequestLogWindow {
+    static let id = "opencode-request-log"
+}
+
 /// What the dashboard is currently focused on: the combined total across every
 /// provider, or a single provider.
 enum DashboardSelection: Hashable {
@@ -40,6 +44,8 @@ enum HeatmapRange: String, CaseIterable, Hashable {
 struct UsageDashboardView: View {
     @Bindable var store: UsageStore
     @Bindable var settings: SettingsStore
+
+    @Environment(\.openWindow) private var openWindowEnv
 
     @State private var selection: DashboardSelection = .overview
     @State private var range: HeatmapRange = .year
@@ -411,7 +417,8 @@ struct UsageDashboardView: View {
         {
             OpenCodeRequestLogView(
                 log: log,
-                selectionColor: self.selectionColor)
+                selectionColor: self.selectionColor,
+                onViewAll: { self.openViewAll(for: provider) })
         } else {
             // Empty placeholder so the layout doesn't jump when the log is
             // still loading. Mirrors the heatmap's "no data" treatment.
@@ -430,6 +437,12 @@ struct UsageDashboardView: View {
                     .fill(Color(nsColor: .controlBackgroundColor)))
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.08)))
         }
+    }
+
+    private func openViewAll(for provider: UsageProvider) {
+        AppOpenWindows.shared.openCodeRequestLogProvider = provider
+        NSApp.activate(ignoringOtherApps: true)
+        self.openWindowEnv(id: OpenCodeRequestLogWindow.id)
     }
 
     private func loadRequestLogForSelection() async {

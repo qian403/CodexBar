@@ -1,3 +1,4 @@
+import AppKit
 import CodexBarCore
 import SwiftUI
 
@@ -204,6 +205,47 @@ struct OpenCodeRequestLogWindowView: View {
         formatter.timeZone = .current
         formatter.dateFormat = "MM-dd HH:mm:ss"
         return formatter.string(from: date)
+    }
+}
+
+/// Reads the active provider from the shared `AppOpenWindows` and renders
+/// the per-provider log. Re-fetches when the shared value changes.
+struct OpenCodeRequestLogWindowHost: View {
+    let store: UsageStore
+
+    var body: some View {
+        let provider = AppOpenWindows.shared.openCodeRequestLogProvider
+        Group {
+            if let provider, let log = self.store.openCodeRequestLog(for: provider) {
+                OpenCodeRequestLogWindowView(
+                    log: log,
+                    selectionColor: self.selectionColor(for: provider),
+                    providerDisplayName: self.store.metadata(for: provider).displayName,
+                    onClose: { self.closeWindow() })
+            } else {
+                VStack(spacing: 12) {
+                    Text(L("No log available for this provider."))
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                    Button(L("Done")) { self.closeWindow() }
+                        .keyboardShortcut(.defaultAction)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
+        }
+    }
+
+    private func selectionColor(for provider: UsageProvider) -> Color {
+        switch provider {
+        case .opencode: return .blue
+        case .opencodego: return .purple
+        default: return .accentColor
+        }
+    }
+
+    private func closeWindow() {
+        AppOpenWindows.shared.openCodeRequestLogProvider = nil
+        NSApp.keyWindow?.performClose(nil)
     }
 }
 
