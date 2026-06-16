@@ -198,8 +198,8 @@ private struct HoverTooltip: View {
                     Text(L("tokens"))
                         .font(.system(size: 10))
                         .foregroundStyle(.tertiary)
-                    + Text(" · ")
-                    + Text(self.tokenText)
+                        + Text(" · ")
+                        + Text(self.tokenText)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
                 }

@@ -8,7 +8,7 @@ import Observation
 @MainActor
 @Observable
 final class AppOpenWindows {
-  static let shared = AppOpenWindows()
+    static let shared = AppOpenWindows()
 
-  var openCodeRequestLogProvider: UsageProvider?
+    var openCodeRequestLogProvider: UsageProvider?
 }

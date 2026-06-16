@@ -9,7 +9,7 @@ struct OpenCodeRequestLogView: View {
 
     let log: OpenCodeRequestLog
     let selectionColor: Color
-    var onViewAll: (() -> Void)? = nil
+    var onViewAll: (() -> Void)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -120,7 +120,7 @@ struct OpenCodeRequestLogView: View {
                 .frame(width: 80, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(UsageFormatter.tokenCountString(entry.outputTokens))
-                .font(.system(size: 11, design: .monospaced))
+                    .font(.system(size: 11, design: .monospaced))
                 if entry.reasoningTokens > 0 {
                     Text("↳ \(UsageFormatter.tokenCountString(entry.reasoningTokens))")
                         .font(.system(size: 9))
