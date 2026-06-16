@@ -1,23 +1,15 @@
 import CodexBarCore
 import SwiftUI
 
-/// Per-request log for OpenCode (and OpenCode Go). Renders a compact table
-/// mirroring the ccswitch `RequestLogTable`: timestamp, model, input / output
-/// / cache read+write, and cost. Pagination defaults to 50 rows so the
-/// dashboard stays scannable.
+/// Compact preview of the OpenCode request log, embedded in the dashboard.
+/// Shows the first `previewCount` entries plus a "View all" button that asks
+/// the parent to open the dedicated request-log Window.
 struct OpenCodeRequestLogView: View {
+    static let previewCount = 10
+
     let log: OpenCodeRequestLog
     let selectionColor: Color
-    let pageSize: Int
-
-    @State private var displayedCount: Int
-
-    init(log: OpenCodeRequestLog, selectionColor: Color, pageSize: Int = 50) {
-        self.log = log
-        self.selectionColor = selectionColor
-        self.pageSize = pageSize
-        self._displayedCount = State(initialValue: min(pageSize, log.entries.count))
-    }
+    var onViewAll: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -29,20 +21,14 @@ struct OpenCodeRequestLogView: View {
             } else {
                 self.tableHeader
                 Divider()
-                ForEach(self.visibleEntries) { entry in
+                ForEach(self.previewEntries) { entry in
                     self.row(for: entry)
                     Divider()
                 }
-                if self.hasMore {
-                    Button {
-                        self.displayedCount = min(
-                            self.displayedCount + self.pageSize,
-                            self.log.entries.count)
-                    } label: {
+                if self.hasMore, let onViewAll {
+                    Button(action: onViewAll) {
                         HStack(spacing: 4) {
-                            Text(L("Load more"))
-                            Text("(\(self.log.entries.count - self.displayedCount) more)")
-                                .foregroundStyle(.secondary)
+                            Text(L("View all (%lld)", self.log.entries.count))
                         }
                         .font(.system(size: 11))
                     }
@@ -104,12 +90,12 @@ struct OpenCodeRequestLogView: View {
         .foregroundStyle(.secondary)
     }
 
-    private var visibleEntries: [OpenCodeRequestLogEntry] {
-        Array(self.log.entries.prefix(self.displayedCount))
+    private var previewEntries: [OpenCodeRequestLogEntry] {
+        Array(self.log.entries.prefix(Self.previewCount))
     }
 
     private var hasMore: Bool {
-        self.displayedCount < self.log.entries.count
+        self.log.entries.count > Self.previewCount
     }
 
     private func row(for entry: OpenCodeRequestLogEntry) -> some View {
@@ -134,7 +120,7 @@ struct OpenCodeRequestLogView: View {
                 .frame(width: 80, alignment: .trailing)
             VStack(alignment: .trailing, spacing: 1) {
                 Text(UsageFormatter.tokenCountString(entry.outputTokens))
-                    .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 11, design: .monospaced))
                 if entry.reasoningTokens > 0 {
                     Text("↳ \(UsageFormatter.tokenCountString(entry.reasoningTokens))")
                         .font(.system(size: 9))
