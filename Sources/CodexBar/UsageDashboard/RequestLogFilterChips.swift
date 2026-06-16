@@ -47,12 +47,10 @@ struct RequestLogFilterChips: View {
                 .padding(.vertical, 3)
                 .background(
                     RoundedRectangle(cornerRadius: 6)
-                        .fill(isOn ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.10))
-                )
+                        .fill(isOn ? Color.accentColor.opacity(0.18) : Color.gray.opacity(0.10)))
                 .overlay(
                     RoundedRectangle(cornerRadius: 6)
-                        .stroke(isOn ? Color.accentColor.opacity(0.6) : Color.gray.opacity(0.20))
-                )
+                        .stroke(isOn ? Color.accentColor.opacity(0.6) : Color.gray.opacity(0.20)))
         }
         .buttonStyle(.plain)
     }
