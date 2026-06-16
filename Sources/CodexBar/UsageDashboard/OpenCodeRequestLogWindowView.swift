@@ -213,6 +213,8 @@ struct OpenCodeRequestLogWindowView: View {
 struct OpenCodeRequestLogWindowHost: View {
     let store: UsageStore
 
+    @Environment(\.dismissWindow) private var dismissWindow
+
     var body: some View {
         let provider = AppOpenWindows.shared.openCodeRequestLogProvider
         Group {
@@ -233,19 +235,25 @@ struct OpenCodeRequestLogWindowHost: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .task(id: provider) {
+            await self.loadLogIfNeeded(for: provider)
+        }
     }
 
     private func selectionColor(for provider: UsageProvider) -> Color {
-        switch provider {
-        case .opencode: return .blue
-        case .opencodego: return .purple
-        default: return .accentColor
+        ProviderDescriptorRegistry.descriptor(for: provider).branding.color.swiftUIColor
+    }
+
+    private func loadLogIfNeeded(for provider: UsageProvider?) async {
+        guard let provider, provider == .opencode || provider == .opencodego else { return }
+        if self.store.openCodeRequestLog(for: provider) == nil {
+            await self.store.loadOpenCodeRequestLog(for: provider, rangeWeeks: 13)
         }
     }
 
     private func closeWindow() {
         AppOpenWindows.shared.openCodeRequestLogProvider = nil
-        NSApp.keyWindow?.performClose(nil)
+        self.dismissWindow(id: OpenCodeRequestLogWindow.id)
     }
 }
 

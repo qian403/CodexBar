@@ -1025,8 +1025,7 @@ extension UsageDashboardView {
     }
 
     private func color(for provider: UsageProvider) -> Color {
-        let c = ProviderDescriptorRegistry.descriptor(for: provider).branding.color
-        return Color(.sRGB, red: c.red, green: c.green, blue: c.blue, opacity: 1)
+        ProviderDescriptorRegistry.descriptor(for: provider).branding.color.swiftUIColor
     }
 
     private var overviewSidebarValue: String {
