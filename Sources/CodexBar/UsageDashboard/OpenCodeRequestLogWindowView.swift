@@ -252,8 +252,8 @@ struct OpenCodeRequestLogWindowHost: View {
     }
 
     private func closeWindow() {
-        AppOpenWindows.shared.openCodeRequestLogProvider = nil
         self.dismissWindow(id: OpenCodeRequestLogWindow.id)
+        AppOpenWindows.shared.openCodeRequestLogProvider = nil
     }
 }
 

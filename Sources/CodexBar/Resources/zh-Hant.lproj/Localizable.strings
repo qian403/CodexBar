@@ -1002,5 +1002,5 @@
 "Showing %lld of %lld requests" = "顯示 %lld / %lld 筆請求";
 "No log available for this provider." = "此提供者沒有可用的紀錄。";
 "Loading OpenCode request log…" = "正在載入 OpenCode 請求紀錄…";
-"Tokens" = "權杖";
+"Tokens" = "token";
 
