@@ -986,3 +986,21 @@
 "Export as JSON" = "匯出為 JSON";
 "Export usage" = "匯出用量";
 
+"Recent requests" = "近期請求";
+"Time" = "時間";
+"Model" = "模型";
+"Input" = "輸入";
+"Output" = "輸出";
+"Cache R/W" = "快取 R/W";
+"No OpenCode requests in the selected range." = "目前範圍內沒有 OpenCode 請求。";
+"View all (%lld)" = "查看全部（%lld）";
+"OpenCode requests" = "OpenCode 請求";
+"OpenCode requests — %@" = "OpenCode 請求 — %@";
+"Select all" = "全選";
+"Deselect all" = "全不選";
+"No requests match the selected models." = "沒有符合選定模型的請求。";
+"Showing %lld of %lld requests" = "顯示 %lld / %lld 筆請求";
+"No log available for this provider." = "此提供者沒有可用的紀錄。";
+"Loading OpenCode request log…" = "正在載入 OpenCode 請求紀錄…";
+"Tokens" = "權杖";
+

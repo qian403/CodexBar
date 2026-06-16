@@ -1120,3 +1120,20 @@
 "Export as CSV" = "Export as CSV";
 "Export as JSON" = "Export as JSON";
 "Export usage" = "Export usage";
+
+"Recent requests" = "Recent requests";
+"Time" = "Time";
+"Model" = "Model";
+"Input" = "Input";
+"Output" = "Output";
+"Cache R/W" = "Cache R/W";
+"No OpenCode requests in the selected range." = "No OpenCode requests in the selected range.";
+"View all (%lld)" = "View all (%lld)";
+"OpenCode requests" = "OpenCode requests";
+"OpenCode requests — %@" = "OpenCode requests — %@";
+"Select all" = "Select all";
+"Deselect all" = "Deselect all";
+"No requests match the selected models." = "No requests match the selected models.";
+"Showing %lld of %lld requests" = "Showing %lld of %lld requests";
+"No log available for this provider." = "No log available for this provider.";
+"Loading OpenCode request log…" = "Loading OpenCode request log…";
