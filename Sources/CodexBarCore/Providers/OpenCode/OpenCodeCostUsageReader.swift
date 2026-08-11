@@ -78,6 +78,13 @@ public enum OpenCodeCostUsageReader {
         }
     }
 
+    /// Resolves a fallback USD cost for one message when OpenCode's local DB
+    /// recorded `cost == 0` (which happens for providers OpenCode doesn't ship
+    /// pricing for, e.g. custom model catalogues). Returns `nil` to leave the
+    /// cost at zero. Mirrors the role ccswitch's `find_model_pricing` +
+    /// `CostCalculator::calculate_for_app` pair plays.
+    public typealias PricingResolver = @Sendable (MessageData) -> Double?
+
     /// Reads the OpenCode DB and emits a per-day `CostUsageDailyReport` for the
     /// given window. Output is identical in shape to the Codex/Claude/Bedrock
     /// readers, so the rest of the dashboard pipeline treats OpenCode like any
@@ -85,15 +92,20 @@ public enum OpenCodeCostUsageReader {
     ///
     /// Reads go through an on-disk cache (`OpenCodeReadCacheIO`) so the SQLite
     /// scan is skipped when `opencode.db` (and its `-wal`) haven't changed
-    /// since the last read.
+    /// since the last read. Pass `pricingResolver` to fill in costs for messages
+    /// where the DB wrote `cost == 0`; when the resolver is non-nil, the
+    /// per-message totals cached on disk include the fallback, so the cost and
+    /// summary numbers stay in sync.
     public static func loadDailyReport(
         since: Date,
         until: Date,
         now: Date = Date(),
         cacheRoot: URL? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment) -> CostUsageDailyReport
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        pricingResolver: PricingResolver? = nil) -> CostUsageDailyReport
     {
-        let cached = self.loadOrScanCache(environment: environment, now: now, cacheRoot: cacheRoot)
+        let cached = self.loadOrScanCache(
+            environment: environment, now: now, cacheRoot: cacheRoot, pricingResolver: pricingResolver)
         return self.filterDailyReport(cached.dailyReport, since: since, until: until)
     }
 
@@ -107,9 +119,11 @@ public enum OpenCodeCostUsageReader {
         until: Date,
         maxEntries: Int = 500,
         cacheRoot: URL? = nil,
-        environment: [String: String] = ProcessInfo.processInfo.environment) -> OpenCodeRequestLog
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        pricingResolver: PricingResolver? = nil) -> OpenCodeRequestLog
     {
-        let cached = self.loadOrScanCache(environment: environment, now: Date(), cacheRoot: cacheRoot)
+        let cached = self.loadOrScanCache(
+            environment: environment, now: Date(), cacheRoot: cacheRoot, pricingResolver: pricingResolver)
         return self.filterRequestLog(
             cached.requestLog,
             since: since,
@@ -128,12 +142,14 @@ public enum OpenCodeCostUsageReader {
     private static func loadOrScanCache(
         environment: [String: String],
         now: Date,
-        cacheRoot: URL?) -> OpenCodeReadCache
+        cacheRoot: URL?,
+        pricingResolver: PricingResolver? = nil) -> OpenCodeReadCache
     {
         let url = self.databaseURL(environment: environment)
 
         if let cached = OpenCodeReadCacheIO.load(cacheRoot: cacheRoot),
            cached.databasePath == url.path,
+           cached.hasPricingResolver == (pricingResolver != nil),
            let resolvedMtime = self.currentMtime(for: url),
            cached.covers(mtime: resolvedMtime)
         {
@@ -147,7 +163,8 @@ public enum OpenCodeCostUsageReader {
         let dbMtime = self.currentMtime(for: url)
         if dbMtime == nil,
            let cached = OpenCodeReadCacheIO.load(cacheRoot: cacheRoot),
-           cached.databasePath == url.path
+           cached.databasePath == url.path,
+           cached.hasPricingResolver == (pricingResolver != nil)
         {
             return cached
         }
@@ -160,12 +177,13 @@ public enum OpenCodeCostUsageReader {
             return OpenCodeReadCache(
                 databasePath: url.path,
                 lastModified: 0,
+                hasPricingResolver: pricingResolver != nil,
                 dailyReport: CostUsageDailyReport(data: [], summary: nil),
                 requestLog: OpenCodeRequestLog(entries: [], rangeStart: .distantPast, rangeEnd: .distantFuture))
         }
 
         let resolvedMtime = dbMtime ?? 0
-        let daily = self.aggregateDaily(messages: messages)
+        let daily = self.aggregateDaily(messages: messages, pricingResolver: pricingResolver)
         let requestLog = self.buildRequestLog(
             messages: messages,
             cap: OpenCodeReadCacheIO.cachedRequestLogCap,
@@ -174,6 +192,7 @@ public enum OpenCodeCostUsageReader {
         let newCache = OpenCodeReadCache(
             databasePath: url.path,
             lastModified: resolvedMtime,
+            hasPricingResolver: pricingResolver != nil,
             dailyReport: daily,
             requestLog: requestLog)
         OpenCodeReadCacheIO.save(newCache, cacheRoot: cacheRoot)
@@ -254,26 +273,40 @@ public enum OpenCodeCostUsageReader {
 
     /// Aggregates a flat list of messages into a per-day
     /// `CostUsageDailyReport`. Mirrors the old inline aggregation logic.
-    private static func aggregateDaily(messages: [MessageData]) -> CostUsageDailyReport {
+    private static func aggregateDaily(
+        messages: [MessageData],
+        pricingResolver: PricingResolver? = nil) -> CostUsageDailyReport
+    {
         let formatter = Self.dayFormatter()
         var byDay: [String: DayAcc] = [:]
 
         for message in messages {
             let day = formatter.string(from: Date(timeIntervalSince1970: Double(message.createdMs) / 1000))
+            // When the DB wrote cost == 0 (e.g. providers OpenCode doesn't ship
+            // pricing for) and the resolver returns a non-nil price, use that
+            // instead. This mirrors ccswitch's find_model_pricing fallback.
+            let effectiveCost: Double = {
+                guard message.cost == 0, message.totalTokens > 0,
+                      let resolver = pricingResolver,
+                      let resolved = resolver(message),
+                      resolved > 0
+                else { return message.cost }
+                return resolved
+            }()
             var acc = byDay[day] ?? DayAcc()
             acc.input += message.inputTokens
             acc.output += message.outputTokens
             acc.reasoning += message.reasoningTokens
             acc.cacheRead += message.cacheReadTokens
             acc.cacheWrite += message.cacheWriteTokens
-            acc.cost += message.cost
+            acc.cost += effectiveCost
             // Each finished assistant message counts as one request — same
             // granularity ccswitch uses for its request log.
             acc.requests += 1
             let modelTotal = message.totalTokens
             var modelAcc = acc.models[message.modelId] ?? ModelAcc()
             modelAcc.tokens += modelTotal
-            modelAcc.cost += message.cost
+            modelAcc.cost += effectiveCost
             acc.models[message.modelId] = modelAcc
             acc.modelsUsed.insert(message.modelId)
             byDay[day] = acc

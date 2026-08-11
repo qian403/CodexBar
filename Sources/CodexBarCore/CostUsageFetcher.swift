@@ -380,26 +380,10 @@ public struct CostUsageFetcher: Sendable {
         }
 
         let clampedHistoryDays = max(1, min(365, historyDays))
-
-        if let remoteSnapshot = try await self.loadRemoteTokenSnapshot(
-            provider: provider,
-            environment: environment,
-            now: now,
-            historyDays: clampedHistoryDays,
-            cursorCookieHeaderOverride: cursorCookieHeaderOverride)
-        {
-            return remoteSnapshot
-        }
-
         var options = Self.resolvedScannerOptions(
             overrideScannerOptions,
             provider: provider,
             codexHomePath: codexHomePath)
-        // Rolling window is inclusive, so a 30-day display starts 29 days before `now`.
-        let since = options.calendar.date(byAdding: .day, value: -(clampedHistoryDays - 1), to: now) ?? now
-        let scopedCodexHomePath = codexHomePath?.trimmingCharacters(in: .whitespacesAndNewlines)
-        // Provider-specific by design: scoped Codex homes exclude ambient Pi sessions from managed-profile totals.
-        let shouldMergePiUsage = provider != .codex || scopedCodexHomePath?.isEmpty != false
         await Self.refreshPricingIfAllowed(
             options: PricingRefreshOptions(
                 provider: provider,
@@ -409,6 +393,24 @@ public struct CostUsageFetcher: Sendable {
             now: now,
             cacheRoot: options.cacheRoot,
             client: modelsDevClient)
+
+        if let remoteSnapshot = try await self.loadRemoteTokenSnapshot(
+            provider: provider,
+            environment: environment,
+            now: now,
+            historyDays: clampedHistoryDays,
+            options: RemoteTokenSnapshotOptions(
+                cursorCookieHeaderOverride: cursorCookieHeaderOverride,
+                pricingCacheRoot: options.cacheRoot))
+        {
+            return remoteSnapshot
+        }
+
+        // Rolling window is inclusive, so a 30-day display starts 29 days before `now`.
+        let since = options.calendar.date(byAdding: .day, value: -(clampedHistoryDays - 1), to: now) ?? now
+        let scopedCodexHomePath = codexHomePath?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Provider-specific by design: scoped Codex homes exclude ambient Pi sessions from managed-profile totals.
+        let shouldMergePiUsage = provider != .codex || scopedCodexHomePath?.isEmpty != false
 
         Self.configureScannerRefresh(
             &options,
@@ -611,7 +613,8 @@ public struct CostUsageFetcher: Sendable {
     {
         guard options.isAllowed,
               options.retryUnknown,
-              options.provider == .codex || options.provider == .claude
+              options.provider == .codex || options.provider == .claude || options.provider == .opencode
+              || options.provider == .opencodego
         else { return }
 
         if options.inBackground {
@@ -1337,17 +1340,73 @@ public struct CostUsageFetcher: Sendable {
             return lhs.month < rhs.month
         }
     }
+
+    // MARK: - OpenCode pricing fallback
+
+    /// Resolves a fallback USD cost for one OpenCode `message` row whose
+    /// `cost` field is zero (or missing). The resolver consults the cached
+    /// `models.dev` catalog via `ModelsDevPricingPipeline` and applies the
+    /// same token→cost formula ccswitch uses: input is fresh input + cache
+    /// read, output is output + reasoning, cache creation is its own bucket.
+    /// Returns `nil` when the catalog has no entry for the provider/model —
+    /// the caller leaves the cost at zero in that case.
+    static func opencodePricingResolver(
+        cacheRoot: URL?,
+        now: Date = Date()) -> OpenCodeCostUsageReader.PricingResolver?
+    {
+        { message in
+            let providerID = message.providerId ?? ""
+            let modelID = message.modelId
+            // Try the (provider, model) match first, then scan every provider
+            // for the model. The second lookup catches custom routers OpenCode
+            // logs (e.g. `kotgg-gpt-opencode`) that don't map to any
+            // models.dev entry but whose underlying model does (e.g.
+            // `MiniMax-M3` listed under `minimax`).
+            let lookup = ModelsDevPricingPipeline.lookup(
+                providerID: providerID,
+                modelID: modelID,
+                now: now,
+                cacheRoot: cacheRoot)
+                ?? ModelsDevPricingPipeline.lookupAnyProvider(
+                    modelID: modelID,
+                    now: now,
+                    cacheRoot: cacheRoot)
+            if lookup == nil {
+                // Debug: provider/model combo not in models.dev catalog.
+                return nil
+            }
+            guard let pricing = lookup?.pricing else { return nil }
+            // Match ccswitch's billing shape for OpenCode: Anthropic-style,
+            // where the freshly-billed input includes cache reads and the
+            // output is the assistant's own tokens plus its reasoning.
+            let inputTokens = message.inputTokens + message.reasoningTokens
+            let outputTokens = message.outputTokens
+            let cacheReadTokens = message.cacheReadTokens
+            let cacheCreationTokens = message.cacheWriteTokens
+            let cost =
+                Double(inputTokens) * pricing.inputCostPerToken +
+                Double(outputTokens) * pricing.outputCostPerToken +
+                Double(cacheReadTokens) * (pricing.cacheReadInputCostPerToken ?? 0) +
+                Double(cacheCreationTokens) * (pricing.cacheCreationInputCostPerToken ?? 0)
+            return cost > 0 ? cost : nil
+        }
+    }
 }
 
 extension CostUsageFetcher {
+    fileprivate struct RemoteTokenSnapshotOptions: Sendable {
+        let cursorCookieHeaderOverride: String?
+        let pricingCacheRoot: URL?
+    }
+
     fileprivate static func loadRemoteTokenSnapshot(
         provider: UsageProvider,
         environment: [String: String],
         now: Date,
         historyDays: Int,
-        cursorCookieHeaderOverride: String?) async throws -> CostUsageTokenSnapshot?
+        options: RemoteTokenSnapshotOptions) async throws -> CostUsageTokenSnapshot?
     {
-        // Provider-specific by design: Bedrock uses AWS billing while Cursor uses its macOS dashboard session.
+        // Provider-specific by design: Bedrock uses AWS billing, OpenCode uses SQLite, and Cursor uses its dashboard.
         let since = Calendar.current.date(byAdding: .day, value: -(historyDays - 1), to: now) ?? now
         if provider == .bedrock {
             let daily = try await Self.loadBedrockDailyReport(
@@ -1366,7 +1425,9 @@ extension CostUsageFetcher {
                 since: since,
                 until: now,
                 now: now,
-                environment: environment)
+                cacheRoot: options.pricingCacheRoot,
+                environment: environment,
+                pricingResolver: Self.opencodePricingResolver(cacheRoot: options.pricingCacheRoot, now: now))
             return Self.tokenSnapshot(from: daily, now: now, historyDays: historyDays)
         }
 
@@ -1376,7 +1437,7 @@ extension CostUsageFetcher {
                 now: now,
                 since: since,
                 historyDays: historyDays,
-                cookieHeaderOverride: cursorCookieHeaderOverride)
+                cookieHeaderOverride: options.cursorCookieHeaderOverride)
         }
         #endif
         return nil

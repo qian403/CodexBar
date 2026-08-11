@@ -68,6 +68,21 @@ struct ModelsDevCatalog: Codable, Equatable {
         return self.providers[providerID]?.pricing(modelID: rawModelID)
     }
 
+    /// Looks up pricing for `modelID` across every provider, returning the
+    /// first match. Useful when the caller only has the model name (e.g.
+    /// OpenCode messages with a `providerID` like `kotgg-gpt-opencode` that
+    /// doesn't map to any catalog entry but the underlying model does, e.g.
+    /// `MiniMax-M3` listed under `minimax`).
+    ///
+    /// Skips `*-coding-plan` providers — those are subscription plans priced
+    /// at 0/0 that would mask the underlying model's pay-as-you-go price.
+    func pricingAnyProvider(forModelID rawModelID: String) -> ModelsDevPricingLookup? {
+        for provider in self.providers.values where !provider.isCodingPlanProvider {
+            if let lookup = provider.pricing(modelID: rawModelID) { return lookup }
+        }
+        return nil
+    }
+
     func isPlausibleRefresh() -> Bool {
         // These are the direct pricing sources CodexBar relies on. Requiring both
         // rejects empty/partial responses without comparing against a fallback-
@@ -133,6 +148,16 @@ struct ModelsDevProvider: Codable, Equatable {
         self.name = name
         self.models = models
         self.mapKey = mapKey
+    }
+
+    /// Subscription-based coding plan providers (e.g. `minimax-coding-plan`,
+    /// `alibaba-coding-plan`) publish 0/0 pricing because users pay a flat
+    /// monthly fee. These entries would mask the underlying model's
+    /// pay-as-you-go price on cross-provider lookups, so the any-provider
+    /// resolver skips them.
+    var isCodingPlanProvider: Bool {
+        let haystacks = [self.id, self.mapKey, self.name].compactMap { $0?.lowercased() }
+        return haystacks.contains { $0.contains("coding-plan") || $0.contains("coding plan") }
     }
 
     init(from decoder: Decoder) throws {
@@ -601,6 +626,23 @@ enum ModelsDevPricingPipeline {
             .artifact?
             .catalog
             .pricing(providerID: providerID, modelID: modelID)
+    }
+
+    /// Cross-provider pricing lookup. Scans every provider entry for a
+    /// matching `modelID` and returns the first hit. Use this when the
+    /// caller can't pin a provider (e.g. OpenCode messages whose
+    /// `providerID` is a custom router that the catalog doesn't know
+    /// about, but whose underlying model does live somewhere in the
+    /// catalog).
+    static func lookupAnyProvider(
+        modelID: String,
+        now: Date = Date(),
+        cacheRoot: URL? = nil) -> ModelsDevPricingLookup?
+    {
+        ModelsDevCache.load(now: now, cacheRoot: cacheRoot)
+            .artifact?
+            .catalog
+            .pricingAnyProvider(forModelID: modelID)
     }
 
     static func refreshIfNeeded(

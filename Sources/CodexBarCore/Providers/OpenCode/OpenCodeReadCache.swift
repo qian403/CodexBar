@@ -10,7 +10,7 @@ import Foundation
 /// `CostUsageDailyReport` and its nested types. The on-disk schema is
 /// internal and may evolve as long as the `currentVersion` field is bumped.
 public struct OpenCodeReadCache: Sendable {
-    static let currentVersion = 1
+    static let currentVersion = 2
 
     /// Schema version. Bumped if the encoded shape changes; older caches are
     /// silently discarded instead of crashing on decode mismatch.
@@ -23,6 +23,11 @@ public struct OpenCodeReadCache: Sendable {
     /// successful read. Compared against the current mtime to decide whether
     /// a re-scan is needed.
     var lastModified: TimeInterval
+    /// `true` when the last scan used a pricing-resolver fallback. Caches
+    /// built without the resolver are not reused when the resolver is in play
+    /// (and vice versa) so the cached costs always reflect the current
+    /// resolver configuration.
+    var hasPricingResolver: Bool
     /// Full daily report (no `since` / `until` applied). Callers filter the
     /// entries to their requested range so the cache is range-agnostic.
     public var dailyReport: CostUsageDailyReport
@@ -35,12 +40,14 @@ public struct OpenCodeReadCache: Sendable {
         version: Int = OpenCodeReadCache.currentVersion,
         databasePath: String,
         lastModified: TimeInterval,
+        hasPricingResolver: Bool = false,
         dailyReport: CostUsageDailyReport,
         requestLog: OpenCodeRequestLog)
     {
         self.version = version
         self.databasePath = databasePath
         self.lastModified = lastModified
+        self.hasPricingResolver = hasPricingResolver
         self.dailyReport = dailyReport
         self.requestLog = requestLog
     }
@@ -126,6 +133,7 @@ public enum OpenCodeReadCacheIO {
         static let version = "v"
         static let databasePath = "db"
         static let lastModified = "mtime"
+        static let hasPricingResolver = "pr"
         static let daily = "daily"
         static let requestLog = "reqlog"
         static let entries = "entries"
@@ -152,6 +160,7 @@ public enum OpenCodeReadCacheIO {
             Key.version: cache.version,
             Key.databasePath: cache.databasePath,
             Key.lastModified: cache.lastModified,
+            Key.hasPricingResolver: cache.hasPricingResolver,
             Key.daily: self.encodeDailyReport(cache.dailyReport),
             Key.requestLog: self.encodeRequestLog(cache.requestLog),
         ]
@@ -163,6 +172,7 @@ public enum OpenCodeReadCacheIO {
               let databasePath = dict[Key.databasePath] as? String,
               let lastModified = dict[Key.lastModified] as? Double
         else { return nil }
+        let hasPricingResolver = dict[Key.hasPricingResolver] as? Bool ?? false
         let dailyReport = (dict[Key.daily] as? [String: Any])
             .flatMap(Self.decodeDailyReport) ?? CostUsageDailyReport(data: [], summary: nil)
         let requestLog = (dict[Key.requestLog] as? [String: Any])
@@ -174,6 +184,7 @@ public enum OpenCodeReadCacheIO {
             version: version,
             databasePath: databasePath,
             lastModified: lastModified,
+            hasPricingResolver: hasPricingResolver,
             dailyReport: dailyReport,
             requestLog: requestLog)
     }

@@ -279,6 +279,143 @@ struct OpenCodeCostUsageReaderTests {
         #expect(report.data.isEmpty)
     }
 
+    // MARK: - Pricing fallback
+
+    @Test
+    func `pricingResolver fills in cost when opencode wrote zero`() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let dataHome = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opencode-test-\(UUID().uuidString)", isDirectory: true)
+        let dbDir = dataHome.appendingPathComponent("opencode", isDirectory: true)
+        try FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataHome) }
+        let dbURL = dbDir.appendingPathComponent("opencode.db")
+
+        func day(_ y: Int, _ m: Int, _ d: Int) throws -> Date {
+            var comps = DateComponents()
+            comps.year = y; comps.month = m; comps.day = d; comps.hour = 12
+            return try #require(calendar.date(from: comps))
+        }
+        func ms(_ date: Date) -> Int64 {
+            Int64(date.timeIntervalSince1970 * 1000)
+        }
+
+        let dayA = try day(2026, 6, 10)
+        var db: OpaquePointer?
+        try #require(sqlite3_open(dbURL.path, &db) == SQLITE_OK)
+        try #require(sqlite3_exec(
+            db,
+            "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+            nil,
+            nil,
+            nil) == SQLITE_OK)
+
+        func insert(_ date: Date, _ data: String) {
+            let escaped = data.replacingOccurrences(of: "'", with: "''")
+            let sql = "INSERT INTO message VALUES ('\(UUID().uuidString)', 'sess-1', \(ms(date)), '\(escaped)');"
+            sqlite3_exec(db, sql, nil, nil, nil)
+        }
+        // Zero cost, has tokens — should be filled by the pricing resolver.
+        insert(dayA, #"""
+        {
+            "role": "assistant", "cost": 0.0,
+            "tokens": { "input": 1000, "output": 100, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "modelID": "gpt-5.5", "providerID": "openai",
+            "time": { "created": 1, "completed": 2 }
+        }
+        """#)
+        // Non-zero cost — should be untouched by the resolver.
+        insert(dayA, #"""
+        {
+            "role": "assistant", "cost": 0.05,
+            "tokens": { "input": 100, "output": 50, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "modelID": "claude-opus-4-7", "providerID": "anthropic",
+            "time": { "created": 3, "completed": 4 }
+        }
+        """#)
+        // Zero cost + zero tokens — resolver must not be invoked.
+        insert(dayA, #"""
+        {
+            "role": "assistant", "cost": 0.0,
+            "tokens": { "input": 0, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "modelID": "minimax-m3", "providerID": "opencode-go",
+            "time": { "created": 5, "completed": 6 }
+        }
+        """#)
+        sqlite3_close(db)
+
+        let calls = CallRecorder()
+        let report = try OpenCodeCostUsageReader.loadDailyReport(
+            since: day(2026, 6, 1),
+            until: day(2026, 6, 30),
+            now: day(2026, 6, 30),
+            environment: ["XDG_DATA_HOME": dataHome.path],
+            pricingResolver: { message in
+                calls.append(providerID: message.providerId ?? "", modelID: message.modelId)
+                if message.modelId == "gpt-5.5" { return 0.001 }
+                return 0
+            })
+
+        let entry = try #require(report.data.first { $0.date == "2026-06-10" })
+        #expect(abs((entry.costUSD ?? 0) - 0.051) < 0.0001)
+        #expect(entry.requestCount == 2)
+        #expect(calls.entries.count == 1)
+        #expect(calls.entries[0].modelID == "gpt-5.5")
+        #expect(calls.entries[0].providerID == "openai")
+    }
+
+    @Test
+    func `pricingResolver returns nil keeps cost at zero`() throws {
+        let calendar = Calendar(identifier: .gregorian)
+        let dataHome = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("opencode-test-\(UUID().uuidString)", isDirectory: true)
+        let dbDir = dataHome.appendingPathComponent("opencode", isDirectory: true)
+        try FileManager.default.createDirectory(at: dbDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dataHome) }
+        let dbURL = dbDir.appendingPathComponent("opencode.db")
+
+        func day(_ y: Int, _ m: Int, _ d: Int) throws -> Date {
+            var comps = DateComponents()
+            comps.year = y; comps.month = m; comps.day = d; comps.hour = 12
+            return try #require(calendar.date(from: comps))
+        }
+        func ms(_ date: Date) -> Int64 {
+            Int64(date.timeIntervalSince1970 * 1000)
+        }
+
+        let dayA = try day(2026, 6, 10)
+        var db: OpaquePointer?
+        try #require(sqlite3_open(dbURL.path, &db) == SQLITE_OK)
+        try #require(sqlite3_exec(
+            db,
+            "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);",
+            nil,
+            nil,
+            nil) == SQLITE_OK)
+
+        let data = #"""
+        {
+            "role": "assistant", "cost": 0.0,
+            "tokens": { "input": 100, "output": 0, "reasoning": 0, "cache": { "read": 0, "write": 0 } },
+            "modelID": "unknown-model", "providerID": "unknown-provider",
+            "time": { "created": 1, "completed": 2 }
+        }
+        """#
+        let escaped = data.replacingOccurrences(of: "'", with: "''")
+        let sql = "INSERT INTO message VALUES ('\(UUID().uuidString)', 'sess-1', \(ms(dayA)), '\(escaped)');"
+        sqlite3_exec(db, sql, nil, nil, nil)
+        sqlite3_close(db)
+
+        let report = try OpenCodeCostUsageReader.loadDailyReport(
+            since: day(2026, 6, 1),
+            until: day(2026, 6, 30),
+            now: day(2026, 6, 30),
+            environment: ["XDG_DATA_HOME": dataHome.path],
+            pricingResolver: { _ in 0.0 })
+        let entry = try #require(report.data.first { $0.date == "2026-06-10" })
+        #expect((entry.costUSD ?? 0) == 0.0)
+    }
+
     // MARK: - Request log
 
     @Test
@@ -404,5 +541,20 @@ struct OpenCodeCostUsageReaderTests {
         #expect(log.totalCostUSD == 0.03)
         // cacheHitRate = 1300 / (1300 + 300) ≈ 0.8125
         #expect(abs(log.cacheHitRate - 1300.0 / 1600.0) < 0.0001)
+    }
+}
+
+private final class CallRecorder: @unchecked Sendable {
+    struct Entry: Equatable { let providerID: String; let modelID: String }
+    private let lock = NSLock()
+    private var storage: [Entry] = []
+    var entries: [Entry] {
+        self.lock.lock(); defer { self.lock.unlock() }
+        return self.storage
+    }
+
+    func append(providerID: String, modelID: String) {
+        self.lock.lock(); defer { self.lock.unlock() }
+        self.storage.append(Entry(providerID: providerID, modelID: modelID))
     }
 }

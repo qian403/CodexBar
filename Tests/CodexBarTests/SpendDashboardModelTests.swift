@@ -68,17 +68,7 @@ struct SpendDashboardModelTests {
         let providers = Set(ProviderDescriptorRegistry.all
             .filter(\.tokenCost.supportsTokenCost)
             .map(\.id))
-        #expect(providers == [
-            .codex,
-            .claude,
-            .vertexai,
-            .openai,
-            .mistral,
-            .bedrock,
-            .cursor,
-            .opencode,
-            .opencodego,
-        ])
+        #expect(providers == [.codex, .claude, .vertexai, .openai, .mistral, .bedrock, .cursor, .opencode, .opencodego])
     }
 
     @Test
