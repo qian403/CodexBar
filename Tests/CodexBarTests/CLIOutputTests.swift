@@ -37,21 +37,26 @@ struct CLIOutputTests {
 
     @Test
     func `text renderer includes deepgram usage metrics`() {
-        let deepgram = DeepgramUsageSnapshot(
-            projectID: "project-123",
-            start: "2026-05-10",
-            end: "2026-05-17",
-            hours: 12.5,
-            totalHours: 14,
-            agentHours: 1.25,
-            tokensIn: 100,
-            tokensOut: 50,
-            ttsCharacters: 1200,
-            requests: 42,
-            updatedAt: Date(timeIntervalSince1970: 0))
+        let deepgram = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            details: [.makeSection(title: "Usage summary", rows: [
+                .makeRow(label: "Requests", value: "42"),
+                .makeRow(label: "Audio", value: "12.5 hours", secondaryValue: "14 billable hours"),
+                .makeRow(label: "Agent hours", value: "1.2"),
+                .makeRow(label: "Tokens", value: "150"),
+                .makeRow(label: "TTS characters", value: "1,200"),
+                .makeRow(label: "Period", value: "2026-05-10 to 2026-05-17"),
+            ])],
+            updatedAt: Date(timeIntervalSince1970: 0),
+            identity: ProviderIdentitySnapshot(
+                providerID: .deepgram,
+                accountEmail: nil,
+                accountOrganization: nil,
+                loginMethod: "Project: project-123"))
         let text = CLIRenderer.renderText(
             provider: .deepgram,
-            snapshot: deepgram.toUsageSnapshot(),
+            snapshot: deepgram,
             credits: nil,
             context: RenderContext(
                 header: "Deepgram (api)",
@@ -60,8 +65,10 @@ struct CLIOutputTests {
                 resetStyle: .countdown))
 
         #expect(text.contains("Requests: 42"))
-        #expect(text.contains("Usage: 12.5 audio hours · 14 billable hours"))
-        #expect(text.contains("Usage: 1.2 agent hours · 150 tokens · 1,200 TTS chars"))
+        #expect(text.contains("Audio: 12.5 hours · 14 billable hours"))
+        #expect(text.contains("Agent hours: 1.2"))
+        #expect(text.contains("Tokens: 150"))
+        #expect(text.contains("TTS characters: 1,200"))
         #expect(text.contains("Period: 2026-05-10 to 2026-05-17"))
     }
 
@@ -94,6 +101,40 @@ struct CLIOutputTests {
         #expect(text.contains("Workspace Alpha Team: $1,234.56"))
         #expect(text.contains("Account: paid@example.com"))
         #expect(!text.contains("Amp Free:"))
+    }
+
+    @Test
+    func `text renderer labels amp subscription pools`() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let snapshot = AmpUsageSnapshot(
+            freeQuota: nil,
+            freeUsed: nil,
+            hourlyReplenishment: nil,
+            windowHours: nil,
+            updatedAt: now,
+            subscription: AmpSubscriptionUsage(
+                plan: "Megawatt",
+                otherUsedPercent: 3,
+                orbUsedPercent: 0,
+                resetsAt: now.addingTimeInterval(29 * 24 * 60 * 60),
+                resetDescription: "renews in 29 days"))
+            .toUsageSnapshot(now: now)
+
+        let text = CLIRenderer.renderText(
+            provider: .amp,
+            snapshot: snapshot,
+            credits: nil,
+            context: RenderContext(
+                header: "Amp (cli)",
+                status: nil,
+                useColor: false,
+                resetStyle: .countdown),
+            now: now)
+
+        #expect(text.contains("Other usage:"))
+        #expect(text.contains("Orb usage:"))
+        #expect(!text.contains("Amp Free:"))
+        #expect(!text.contains("Balance:"))
     }
 
     @Test
@@ -148,5 +189,87 @@ struct CLIOutputTests {
         #expect(text.contains("Balance: $25.51"))
         #expect(text.contains("Plan: Standard"))
         #expect(!text.contains("Window: 100%"))
+    }
+
+    @Test
+    func `text renderer preserves compact mimo local summary casing`() {
+        let summary = "Local · 1.5k total · 42 sessions · stale 34d"
+        let snapshot = MiMoUsageSnapshot(
+            balance: 0,
+            currency: "",
+            planCode: summary,
+            updatedAt: Date(timeIntervalSince1970: 0))
+            .toUsageSnapshot(includeBalance: false)
+
+        let text = CLIRenderer.renderText(
+            provider: .mimo,
+            snapshot: snapshot,
+            credits: nil,
+            context: RenderContext(
+                header: "Xiaomi MiMo (local)",
+                status: nil,
+                useColor: false,
+                resetStyle: .countdown))
+
+        #expect(CLIRenderer.planBadgeText(provider: .mimo, snapshot: snapshot) == summary)
+        #expect(text.contains("Plan: \(summary)"))
+        #expect(!text.contains("Stale 34D"))
+    }
+
+    @Test
+    func `text renderer includes Claude extra usage balance`() {
+        let now = Date(timeIntervalSince1970: 0)
+        let snapshot = UsageSnapshot(
+            primary: RateWindow(usedPercent: 10, windowMinutes: 300, resetsAt: nil, resetDescription: nil),
+            secondary: nil,
+            providerCost: ProviderCostSnapshot(
+                used: 5,
+                limit: 20,
+                currencyCode: "USD",
+                period: "Monthly cap",
+                balance: 100,
+                updatedAt: now),
+            updatedAt: now)
+
+        let text = CLIRenderer.renderText(
+            provider: .claude,
+            snapshot: snapshot,
+            credits: nil,
+            context: RenderContext(
+                header: "Claude (web)",
+                status: nil,
+                useColor: false,
+                resetStyle: .countdown))
+
+        #expect(text.contains("Extra usage balance: $100.00"))
+    }
+
+    @Test
+    func `text renderer does not show zero cost for Claude balance only snapshot`() {
+        let now = Date(timeIntervalSince1970: 0)
+        let snapshot = UsageSnapshot(
+            primary: nil,
+            secondary: nil,
+            providerCost: ProviderCostSnapshot(
+                used: 0,
+                limit: 0,
+                currencyCode: "USD",
+                period: "Extra usage",
+                balance: 100,
+                updatedAt: now),
+            updatedAt: now)
+
+        let text = CLIRenderer.renderText(
+            provider: .claude,
+            snapshot: snapshot,
+            credits: nil,
+            context: RenderContext(
+                header: "Claude (web)",
+                status: nil,
+                useColor: false,
+                resetStyle: .countdown))
+
+        #expect(text.contains("Extra usage balance: $100.00"))
+        #expect(!text.contains("Cost: 0.0 / 0.0"))
     }
 }

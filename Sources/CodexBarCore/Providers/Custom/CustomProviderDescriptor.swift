@@ -5,8 +5,21 @@ import Foundation
 /// per-slot base URL + API key.
 public enum CustomProviderDescriptors {
     public static func descriptor(for provider: UsageProvider) -> ProviderDescriptor {
-        ProviderDescriptor(
+        let apiKeyEnvironmentKey = CustomSettingsReader.apiKeyEnvironmentKey(for: provider)
+        let credentials = ProviderCredentialAdapter.apiKey(
+            environmentKey: apiKeyEnvironmentKey,
+            additionalProjections: [
+                .enterpriseHost(CustomSettingsReader.baseURLEnvironmentKey(for: provider)),
+                .region(CustomSettingsReader.userIDEnvironmentKey(for: provider)),
+            ],
+            resolve: { environment in
+                CustomSettingsReader.apiKey(for: provider, environment: environment)
+            },
+            usesRegion: true)
+        return ProviderDescriptor(
             id: provider,
+            credentials: credentials,
+            config: ProviderConfigCapabilities(supportsEnterpriseHost: true),
             metadata: ProviderMetadata(
                 id: provider,
                 displayName: provider.customDefaultDisplayName ?? "Custom",
@@ -19,15 +32,21 @@ public enum CustomProviderDescriptors {
                 toggleTitle: "Show \(provider.customDefaultDisplayName ?? "Custom") usage",
                 cliName: provider.rawValue,
                 defaultEnabled: false,
+                widgetSelectable: false,
                 isPrimaryProvider: false,
                 usesAccountFallback: false,
                 browserCookieOrder: nil,
                 dashboardURL: nil,
                 statusPageURL: nil),
             branding: ProviderBranding(
-                iconStyle: .custom,
+                iconStyle: .init(provider: provider),
                 iconResourceName: "ProviderIcon-custom",
-                color: ProviderColor(red: 124 / 255, green: 132 / 255, blue: 148 / 255)),
+                color: ProviderColor(red: 124 / 255, green: 132 / 255, blue: 148 / 255),
+                confettiPalette: [
+                    ProviderColor(hex: 0x4B5563),
+                    ProviderColor(hex: 0x7C8494),
+                    ProviderColor(hex: 0xD1D5DB),
+                ]),
             tokenCost: ProviderTokenCostConfig(
                 supportsTokenCost: false,
                 noDataMessage: { "Custom provider spend is shown in the usage limits." }),
@@ -38,6 +57,7 @@ public enum CustomProviderDescriptors {
                 })),
             cli: ProviderCLIConfig(
                 name: provider.rawValue,
+                // Provider-specific by design: the first Custom slot retains legacy Sub2API aliases.
                 aliases: provider == .custom ? ["new-api", "newapi", "one-api", "oneapi", "sub2api"] : [],
                 versionDetector: nil))
     }
@@ -52,12 +72,12 @@ struct CustomAPIFetchStrategy: ProviderFetchStrategy {
     }
 
     func isAvailable(_ context: ProviderFetchContext) async -> Bool {
-        ProviderTokenResolver.customToken(for: self.provider, environment: context.env) != nil &&
+        ProviderTokenResolver.token(for: self.provider, environment: context.env) != nil &&
             CustomSettingsReader.baseURL(for: self.provider, environment: context.env) != nil
     }
 
     func fetch(_ context: ProviderFetchContext) async throws -> ProviderFetchResult {
-        guard let apiKey = ProviderTokenResolver.customToken(for: self.provider, environment: context.env) else {
+        guard let apiKey = ProviderTokenResolver.token(for: self.provider, environment: context.env) else {
             throw CustomUsageError.missingCredentials
         }
         guard let baseURL = CustomSettingsReader.baseURL(for: self.provider, environment: context.env) else {

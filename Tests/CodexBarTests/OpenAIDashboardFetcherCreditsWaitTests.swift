@@ -268,6 +268,7 @@ struct OpenAIDashboardFetcherCreditsWaitTests {
         #expect(request.value(forHTTPHeaderField: "Cookie") == "a=b")
         #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
         #expect(request.value(forHTTPHeaderField: "Accept-Language") == "en-US,en;q=0.9")
+        #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
     }
 
     @Test
@@ -279,6 +280,22 @@ struct OpenAIDashboardFetcherCreditsWaitTests {
         #expect(request.value(forHTTPHeaderField: "Cookie") == "a=b")
         #expect(request.value(forHTTPHeaderField: "Accept") == "application/json")
         #expect(request.value(forHTTPHeaderField: "Accept-Language") == "en-US,en;q=0.9")
+        #expect(request.cachePolicy == .reloadIgnoringLocalCacheData)
+    }
+
+    @Test
+    func `dashboard api requests accept shared deadline timeout clamps`() throws {
+        let url = try #require(URL(string: "https://chatgpt.com/backend-api/me"))
+        let usageRequest = OpenAIDashboardFetcher.dashboardUsageAPIRequest(
+            cookieHeader: "a=b",
+            timeout: 1.25)
+        let identityRequest = OpenAIDashboardFetcher.dashboardIdentityAPIRequest(
+            url: url,
+            cookieHeader: "a=b",
+            timeout: 0.75)
+
+        #expect(usageRequest.timeoutInterval == 1.25)
+        #expect(identityRequest.timeoutInterval == 0.75)
     }
 
     @Test

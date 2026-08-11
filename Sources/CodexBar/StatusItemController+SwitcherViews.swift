@@ -4,7 +4,7 @@ import QuartzCore
 
 enum ProviderSwitcherSelection: Hashable {
     case overview
-    case provider(UsageProvider)
+    case provider(ProviderInstanceID)
 }
 
 final class ProviderSwitcherView: NSView {
@@ -41,7 +41,6 @@ final class ProviderSwitcherView: NSView {
     private var hoveredButtonTag: Int?
     private var pressedButtonTag: Int?
     private var selectedSegmentIndex: Int?
-    private let lightModeOverlayLayer = CALayer()
     private static let quotaIndicatorHeight: CGFloat = 2
     private static let quotaIndicatorBottomInset: CGFloat = 2
     private static let quotaIndicatorHorizontalInset: CGFloat = 8
@@ -64,7 +63,7 @@ final class ProviderSwitcherView: NSView {
             // Avoid any resampling: we ship exact 16pt/32px assets for crisp rendering.
             icon.size = NSSize(width: 16, height: 16)
             return Segment(
-                selection: .provider(provider),
+                selection: .provider(provider.instanceID),
                 image: icon,
                 title: fullTitle)
         }
@@ -107,9 +106,6 @@ final class ProviderSwitcherView: NSView {
         Self.clearButtonWidthCache()
         self.wantsLayer = true
         self.layer?.masksToBounds = false
-        self.lightModeOverlayLayer.masksToBounds = false
-        self.layer?.insertSublayer(self.lightModeOverlayLayer, at: 0)
-        self.updateLightModeStyling()
 
         func makeButton(index: Int, segment: Segment) -> NSButton {
             let button: NSButton
@@ -214,14 +210,8 @@ final class ProviderSwitcherView: NSView {
         self.updateButtonStyles()
     }
 
-    override func layout() {
-        super.layout()
-        self.lightModeOverlayLayer.frame = self.bounds
-    }
-
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
-        self.updateLightModeStyling()
         self.updateButtonStyles()
     }
 
@@ -678,8 +668,8 @@ final class ProviderSwitcherView: NSView {
 
     private func remainingPercent(for selection: ProviderSwitcherSelection) -> Double? {
         switch selection {
-        case let .provider(provider):
-            self.weeklyRemainingProvider(provider)
+        case let .provider(instanceID):
+            instanceID.firstPartyProvider.flatMap(self.weeklyRemainingProvider)
         case .overview:
             nil
         }
@@ -715,15 +705,6 @@ final class ProviderSwitcherView: NSView {
 
     private func isLightMode() -> Bool {
         self.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .aqua
-    }
-
-    private func updateLightModeStyling() {
-        guard self.isLightMode() else {
-            self.lightModeOverlayLayer.backgroundColor = nil
-            return
-        }
-        // The menu card background is very bright in light mode; add a subtle neutral wash to ground the switcher.
-        self.lightModeOverlayLayer.backgroundColor = NSColor.black.withAlphaComponent(0.035).cgColor
     }
 
     private func hoverPlateColor() -> CGColor {
@@ -1164,7 +1145,8 @@ extension ProviderSwitcherView {
         remainingPercent _: Double) -> NSColor
     {
         switch selection {
-        case let .provider(provider):
+        case let .provider(instanceID):
+            guard let provider = instanceID.firstPartyProvider else { return NSColor.secondaryLabelColor }
             let color = ProviderDescriptorRegistry.descriptor(for: provider).branding.color
             return NSColor(deviceRed: color.red, green: color.green, blue: color.blue, alpha: 1)
         case .overview:

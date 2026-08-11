@@ -1,6 +1,10 @@
-#if canImport(Glibc)
+#if canImport(Glibc) || canImport(Musl)
 import Foundation
+#if canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 import Testing
 @testable import CodexBarCore
 
@@ -36,7 +40,8 @@ struct AntigravityProcessLauncherLinuxTests {
           echo closed >> \(outputURL.path)
         fi
         """
-        // Direct writes close the executable before spawn; atomic replacement can race with exec on overlay filesystems.
+        // Direct writes close the executable before spawn; atomic replacement can race with exec on overlay
+        // filesystems.
         try Data(script.utf8).write(to: scriptURL)
         #expect(chmod(scriptURL.path, 0o700) == 0)
 
@@ -47,7 +52,15 @@ struct AntigravityProcessLauncherLinuxTests {
             handle.closePTY()
         }
 
-        for _ in 0..<200 where !FileManager.default.fileExists(atPath: outputURL.path) {
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: outputURL.path),
+               let output = try? String(contentsOf: outputURL, encoding: .utf8)
+            {
+                let lines = output
+                    .split(separator: "\n")
+                    .map(String.init)
+                if lines.count >= 2, output.hasSuffix("\n") { break }
+            }
             Thread.sleep(forTimeInterval: 0.01)
         }
         let lines = try String(contentsOf: outputURL, encoding: .utf8)

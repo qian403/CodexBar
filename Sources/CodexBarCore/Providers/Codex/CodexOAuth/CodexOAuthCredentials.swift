@@ -1,3 +1,10 @@
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#elseif canImport(Musl)
+import Musl
+#endif
 import Foundation
 
 public struct CodexOAuthCredentials: Sendable {
@@ -67,33 +74,57 @@ public enum CodexOAuthCredentialsStore {
         return try self.parse(data: data)
     }
 
+    public static func loadOAuthTokens(env: [String: String] = ProcessInfo.processInfo
+        .environment) throws -> CodexOAuthCredentials
+    {
+        let url = self.authFilePath(env: env)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw CodexOAuthCredentialsError.notFound
+        }
+
+        let data = try Data(contentsOf: url)
+        guard let credentials = try self.tokenCredentials(data: data) else {
+            throw CodexOAuthCredentialsError.missingTokens
+        }
+        return credentials
+    }
+
     public static func parse(data: Data) throws -> CodexOAuthCredentials {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw CodexOAuthCredentialsError.decodeFailed("Invalid JSON")
         }
 
-        if let apiKey = json["OPENAI_API_KEY"] as? String,
-           !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        {
-            return CodexOAuthCredentials(
-                accessToken: apiKey,
-                refreshToken: "",
-                idToken: nil,
-                accountId: nil,
-                lastRefresh: nil)
+        if let apiKeyCredentials = Self.apiKeyCredentials(in: json) {
+            return apiKeyCredentials
         }
 
-        guard let tokens = json["tokens"] as? [String: Any] else {
-            throw CodexOAuthCredentialsError.missingTokens
+        if let tokenCredentials = Self.tokenCredentials(in: json) {
+            return tokenCredentials
         }
-        guard let accessToken = Self.stringValue(in: tokens, snakeCaseKey: "access_token", camelCaseKey: "accessToken"),
-              let refreshToken = Self.stringValue(
+
+        throw CodexOAuthCredentialsError.missingTokens
+    }
+
+    private static func tokenCredentials(data: Data) throws -> CodexOAuthCredentials? {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw CodexOAuthCredentialsError.decodeFailed("Invalid JSON")
+        }
+        return self.tokenCredentials(in: json)
+    }
+
+    private static func tokenCredentials(in json: [String: Any]) -> CodexOAuthCredentials? {
+        guard let tokens = json["tokens"] as? [String: Any],
+              let accessToken = stringValue(
+                  in: tokens,
+                  snakeCaseKey: "access_token",
+                  camelCaseKey: "accessToken"),
+              let refreshToken = stringValue(
                   in: tokens,
                   snakeCaseKey: "refresh_token",
                   camelCaseKey: "refreshToken"),
               !accessToken.isEmpty
         else {
-            throw CodexOAuthCredentialsError.missingTokens
+            return nil
         }
 
         let idToken = Self.stringValue(in: tokens, snakeCaseKey: "id_token", camelCaseKey: "idToken")
@@ -106,6 +137,20 @@ public enum CodexOAuthCredentialsStore {
             idToken: idToken,
             accountId: accountId,
             lastRefresh: lastRefresh)
+    }
+
+    private static func apiKeyCredentials(in json: [String: Any]) -> CodexOAuthCredentials? {
+        guard let apiKey = json["OPENAI_API_KEY"] as? String,
+              !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else {
+            return nil
+        }
+        return CodexOAuthCredentials(
+            accessToken: apiKey,
+            refreshToken: "",
+            idToken: nil,
+            accountId: nil,
+            lastRefresh: nil)
     }
 
     public static func save(
@@ -138,7 +183,7 @@ public enum CodexOAuthCredentialsStore {
         let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        try data.write(to: url, options: .atomic)
+        try CredentialFileWriter.writePrivate(data, to: url)
     }
 
     private static func parseLastRefresh(from raw: Any?) -> Date? {
@@ -170,6 +215,14 @@ public enum CodexOAuthCredentialsStore {
 extension CodexOAuthCredentialsStore {
     static func _authFileURLForTesting(env: [String: String]) -> URL {
         self.authFilePath(env: env)
+    }
+
+    static func _writePrivateFileForTesting(
+        _ data: Data,
+        to url: URL,
+        beforePublish: @escaping (URL) throws -> Void) throws
+    {
+        try CredentialFileWriter.writePrivate(data, to: url, beforePublish: beforePublish)
     }
 }
 #endif

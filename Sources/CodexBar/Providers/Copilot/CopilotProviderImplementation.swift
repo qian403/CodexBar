@@ -113,6 +113,7 @@ struct CopilotProviderImplementation: ProviderImplementation {
                 id: "copilot-icon-secondary-window",
                 title: "Menu bar secondary metric",
                 subtitle: "Choose the second meter shown in the menu bar icon.",
+                placement: .menuBar,
                 dynamicSubtitle: {
                     extraWindows.isEmpty
                         ? "Budget options appear after a refresh finds configured Copilot budgets."
@@ -147,9 +148,7 @@ struct CopilotProviderImplementation: ProviderImplementation {
                 },
                 trailingText: {
                     guard context.settings.copilotBudgetCookieSource != .manual else { return nil }
-                    guard let entry = CookieHeaderCache.loadForDisplay(provider: .copilot) else { return nil }
-                    let when = entry.storedAt.relativeDescription()
-                    return "Cached: \(entry.sourceLabel) • \(when)"
+                    return ProviderCookieSourceUI.cachedTrailingText(provider: .copilot)
                 }),
         ]
     }
@@ -182,7 +181,8 @@ struct CopilotProviderImplementation: ProviderImplementation {
             ProviderSettingsFieldDescriptor(
                 id: "copilot-enterprise-host",
                 title: "Enterprise host",
-                subtitle: "Optional. Enter your GitHub Enterprise host, for example octocorp.ghe.com. Leave blank for github.com.",
+                subtitle: "Optional. Enter your GitHub Enterprise host, for example octocorp.ghe.com. " +
+                    "Leave blank for github.com.",
                 kind: .plain,
                 placeholder: "github.com",
                 binding: context.stringBinding(\.copilotEnterpriseHost),
@@ -215,5 +215,10 @@ struct CopilotProviderImplementation: ProviderImplementation {
     func runLoginFlow(context: ProviderLoginContext) async -> Bool {
         await CopilotLoginFlow.run(settings: context.controller.settings)
         return true
+    }
+
+    @MainActor
+    func runTokenAccountPrimaryAction(context: ProviderSettingsContext) async {
+        await CopilotLoginFlow.run(settings: context.settings)
     }
 }

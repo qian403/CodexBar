@@ -38,7 +38,9 @@ Safari cookie import may require granting CodexBar Full Disk Access in **System 
 - Fetches balance and token-plan detail/usage endpoints under `https://platform.xiaomimimo.com/api/v1`
 - Requires the `api-platform_serviceToken` and `userId` cookies
 - Accepts optional MiMo cookies like `api-platform_ph` and `api-platform_slh` when present
-- Supports `MIMO_API_URL` to override the base API URL for testing
+- Supports `MIMO_API_URL` to override the base API URL for testing. Override values must be explicit HTTPS URLs or
+  bare hosts/paths that CodexBar normalizes to HTTPS. Explicit `http://` values fail closed before MiMo cookies are
+  attached to a request, and invalid endpoint overrides do not fall back to local MiMo usage accounting.
 
 ## Limitations
 
@@ -79,7 +81,7 @@ This fallback is **implicit opt-in**: it only activates when `~/.codexbar/mimo-l
 
 3. Trigger updates either on each wrapper invocation (recommended — call `mimo-usage --update` post-exec from your MiMo CLI launcher) or via a `launchd` / `cron` job every 5 minutes.
 
-4. CodexBar picks up the file on its next refresh. The MiMo card displays `Xiaomi MiMo (local)` with a `Local · <today> · <week> · <lifetime> · <sessions>` summary and the cache's actual update time. Local activity is not rendered as a quota percentage. The `Balance updates / Daily billing finalizes` footer is suppressed for `local` source since neither applies.
+4. CodexBar picks up the file on its next refresh. The MiMo card displays `Xiaomi MiMo (local)` with a `Local · <today> · <week> · <lifetime> · <sessions>` summary and the cache's actual update time. Local activity is not rendered as a quota percentage. The `Balance updates / Daily billing finalizes` footer is suppressed for `local` source since neither applies. Because CodexBar only reads this cache (it never regenerates it), a summary whose cache has not refreshed within 12 hours gets a `stale <age>` marker (e.g. `stale 34d`) so a frozen tracker is not misread as live usage — re-run `mimo-usage --update`, or add the scheduled job in step 3, to clear it.
 
 ### Wrapper integration example
 

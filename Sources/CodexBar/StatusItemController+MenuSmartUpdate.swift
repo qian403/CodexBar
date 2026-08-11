@@ -27,6 +27,7 @@ extension StatusItemController {
         let anchoredTop = self.capturedMenuWindowTop(menu)
         defer { self.reanchorMenuWindowTop(menu, to: anchoredTop) }
         self.performMenuMutationWithoutAnimation {
+            defer { self.flushHostedMenuRowRendering(in: menu) }
             let contentStartIndex = self.providerSwitcherContentStartIndex(in: menu)
             if let switcherView = menu.items.first?.view as? ProviderSwitcherView {
                 switcherView.updateSelection(context.switcherSelection)
@@ -34,7 +35,7 @@ extension StatusItemController {
             }
             let outgoingSelection = self.lastMergedMenuContentSelection
             let isSelectionSwitch = outgoingSelection != nil && outgoingSelection != context.switcherSelection
-            let enabledProviders = self.store.enabledProvidersForDisplay()
+            let enabledProviders = self.store.enabledFirstPartyProvidersForDisplay()
 
             if isSelectionSwitch,
                let outgoingSelection,
@@ -45,6 +46,8 @@ extension StatusItemController {
                    codexAccountDisplay: context.codexAccountDisplay,
                    tokenAccountDisplay: context.tokenAccountDisplay)
             {
+                MenuSwitchFlickerProbe.debugLog("cached-swap begin \(context.switcherSelection)")
+                defer { MenuSwitchFlickerProbe.debugLog("cached-swap end") }
                 // Park the outgoing payloads for an equally instant switch-back. Compatible
                 // menu-item shells stay attached, avoiding the empty intermediate layout that
                 // AppKit can visibly render when the whole content block is removed first.
@@ -55,6 +58,9 @@ extension StatusItemController {
                     menu,
                     fromIndex: contentStartIndex,
                     with: cachedItems)
+                // Cached items may have changed refresh state while detached from a menu.
+                self.updatePersistentRefreshItemsEnabled()
+                self.refreshMenuCardHeights(in: menu)
                 self.cacheMergedSwitcherContent(
                     displacedItems,
                     in: menu,
@@ -80,6 +86,7 @@ extension StatusItemController {
             // unchanged, so an open tracked menu sees content mutations instead of item
             // churn. The fresh content is built into a detached scratch menu while its
             // interaction closures capture the live menu they will serve.
+            MenuSwitchFlickerProbe.debugLog("reconcile-path \(context.switcherSelection)")
             let shapes = self.menuContentShapes(in: menu, fromIndex: contentStartIndex)
             self.harvestRecyclableMenuCardViews(
                 in: menu,
@@ -92,6 +99,7 @@ extension StatusItemController {
             scratch.autoenablesItems = false
             self.addSwitcherScopedMenuContent(into: scratch, captureMenu: menu, context: context)
             self.reconcileMenuContent(menu, fromIndex: contentStartIndex, shapes: shapes, with: scratch)
+            self.refreshMenuCardHeights(in: menu)
             self.cacheVisibleMergedSwitcherContent(
                 in: menu,
                 selection: context.switcherSelection,
@@ -142,7 +150,7 @@ extension StatusItemController {
     /// Adds everything below the provider switcher (account switchers, card content, and
     /// actionable sections) to `target`, which may be a detached scratch menu; interaction
     /// closures always capture `captureMenu`, the live menu the rows will serve.
-    private func addSwitcherScopedMenuContent(
+    func addSwitcherScopedMenuContent(
         into target: NSMenu,
         captureMenu: NSMenu,
         context: MenuUpdateContext)

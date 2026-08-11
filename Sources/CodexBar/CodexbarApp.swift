@@ -6,7 +6,33 @@ import QuartzCore
 import Security
 import SwiftUI
 
+enum CodexBarLaunchMode: Equatable {
+    case application
+    case hookEvent
+
+    static func resolve(arguments: [String]) -> Self {
+        // Other CodexBar installations can leave this app path registered in ~/.codex/hooks.json.
+        // Treat those invocations as a no-op before AppKit creates a second set of status items.
+        arguments.dropFirst().contains("--hook-event") ? .hookEvent : .application
+    }
+}
+
 @main
+enum CodexBarEntryPoint {
+    @MainActor
+    static func main() {
+        // Packaging launch smoke check (#2738): force the resource loads that
+        // trapped in 0.48.0 and exit before any AppKit/UI setup.
+        if CodexBarCoreResourceSmoke.isRequested() {
+            exit(CodexBarCoreResourceSmoke.run())
+        }
+        guard CodexBarLaunchMode.resolve(arguments: CommandLine.arguments) == .application else {
+            return
+        }
+        CodexBarApp.main()
+    }
+}
+
 struct CodexBarApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var settings: SettingsStore
@@ -91,6 +117,7 @@ struct CodexBarApp: App {
             PreferencesView(
                 settings: self.settings,
                 store: self.store,
+                cloudSyncState: self.appDelegate.cloudSyncState,
                 updater: self.appDelegate.updaterController,
                 selection: self.preferencesSelection,
                 managedCodexAccountCoordinator: self.managedCodexAccountCoordinator,
@@ -99,8 +126,8 @@ struct CodexBarApp: App {
                     await self.appDelegate.runProviderLoginFlow(provider)
                 })
         }
-        .defaultSize(width: PreferencesTab.general.preferredWidth, height: PreferencesTab.general.preferredHeight)
-        .windowResizability(.contentSize)
+        .defaultSize(width: SettingsPane.windowWidth, height: SettingsPane.windowHeight)
+        .windowResizability(.contentMinSize)
 
         Window(L("Usage Heatmap"), id: UsageDashboardWindow.id) {
             UsageDashboardView(store: self.store, settings: self.settings)
@@ -115,19 +142,25 @@ struct CodexBarApp: App {
         .windowResizability(.contentMinSize)
     }
 
-    private func openSettings(tab: PreferencesTab) {
-        self.preferencesSelection.tab = tab
+    private func openSettings(pane: SettingsPane) {
+        self.preferencesSelection.pane = pane
+        DockIconController.shared.promote()
         NSApp.activate(ignoringOtherApps: true)
-        _ = NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+        let outcome = SettingsWindowOpener.live().open(preferred: .appKit)
+        let logger = CodexBarLog.logger(LogCategories.app)
+        switch outcome {
+        case .preferred:
+            break
+        case .fallback:
+            logger.warning("Settings AppKit action was not handled; used notification fallback")
+        case .failed:
+            logger.error("Failed to open Settings; AppKit action and notification fallback unavailable")
+        }
     }
 
     private static func applyLanguagePreference(from settings: SettingsStore) {
-        let language = settings.appLanguage
-        if language.isEmpty {
-            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-        } else {
-            UserDefaults.standard.set([language], forKey: "AppleLanguages")
-        }
+        AppLanguagePreferenceMigration.clearLegacyOverrideIfOwned(storedAppLanguage: settings.appLanguage)
+        resetCodexBarLocalizationCache()
     }
 }
 
@@ -219,12 +252,13 @@ final class SparkleUpdaterController: NSObject, UpdaterProviding, SPUUpdaterDele
     }
 
     func checkForUpdates(_ sender: Any?) {
+        DockIconController.shared.promote()
         self.controller.checkForUpdates(sender)
     }
 
     func installUpdate() {
         guard let immediateInstallHandler else {
-            self.controller.checkForUpdates(nil)
+            self.checkForUpdates(nil)
             return
         }
 
@@ -363,8 +397,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     let updaterController: UpdaterProviding = makeUpdaterController()
+    let cloudSyncState = CloudSyncState()
     private let confettiOverlayController = ScreenConfettiOverlayController()
     private let confettiLogger = CodexBarLog.logger(LogCategories.confetti)
+    private let dockIconController = DockIconController.shared
+    private lazy var memoryPressureMonitor = MemoryPressureMonitor(trimAppCaches: { [weak self] in
+        self?.trimRebuildableCachesForMemoryPressure() ?? MemoryPressureCacheTrimSummary()
+    })
+
     private var statusController: StatusItemControlling?
     private var store: UsageStore?
     private var settings: SettingsStore?
@@ -372,7 +412,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var preferencesSelection: PreferencesSelection?
     private var managedCodexAccountCoordinator: ManagedCodexAccountCoordinator?
     private var codexAccountPromotionCoordinator: CodexAccountPromotionCoordinator?
-    private var hasInstalledWeeklyLimitResetObserver = false
+    private var cloudSyncCoordinator: CloudSyncCoordinator?
+    private var hasInstalledLimitResetObservers = false
+    #if DEBUG
+    private var debugMemoryPressureObserver: NSObjectProtocol?
+    #endif
     var terminateActiveProcessesForAppShutdown: () -> Void = {
         TTYCommandRunner.terminateActiveProcessesForAppShutdown()
     }
@@ -384,6 +428,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.preferencesSelection = dependencies.selection
         self.managedCodexAccountCoordinator = dependencies.managedCodexAccountCoordinator
         self.codexAccountPromotionCoordinator = dependencies.codexAccountPromotionCoordinator
+        self.cloudSyncCoordinator = CloudSyncCoordinator(settings: dependencies.settings, state: self.cloudSyncState)
     }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -391,29 +436,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        AppNotifications.shared.requestAuthorizationOnStartup()
+        self.dockIconController.start()
+        self.memoryPressureMonitor.start()
+        #if DEBUG
+        self.installDebugMemoryPressureObserverIfNeeded()
+        #endif
         self.ensureStatusController()
+        self.cloudSyncCoordinator?.start()
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let settings = self?.settings else { return }
+            AdaptiveActivityConsentPresenter.presentIfNeeded(settings: settings)
+            AppNotifications.shared.requestAuthorizationOnStartup()
+            // A persisted non-USD choice opts into the daily exchange-rate refresh. The service
+            // returns before networking for the default USD setting and Auto.
+            guard CurrencyExchange.requiresLiveRates(
+                preferredCurrencyCode: settings.preferredCurrencyCode)
+            else { return }
+            await CurrencyExchange.shared.fetchLatestRatesIfNeeded(
+                preferredCurrencyCode: settings.preferredCurrencyCode)
+        }
         KeyboardShortcuts.onKeyUp(for: .openMenu) { [weak self] in
             // KeyboardShortcuts dispatches both normal and menu-tracking hotkeys on the main event loop.
             MainActor.assumeIsolated {
                 self?.statusController?.openMenuFromShortcut()
             }
         }
-        if !self.hasInstalledWeeklyLimitResetObserver {
+        if !self.hasInstalledLimitResetObservers {
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(self.handleSessionLimitResetNotification(_:)),
+                name: .codexbarSessionLimitReset,
+                object: nil)
             NotificationCenter.default.addObserver(
                 self,
                 selector: #selector(self.handleWeeklyLimitResetNotification(_:)),
                 name: .codexbarWeeklyLimitReset,
                 object: nil)
-            self.hasInstalledWeeklyLimitResetObserver = true
+            self.hasInstalledLimitResetObservers = true
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        self.cloudSyncCoordinator?.stop()
+        self.memoryPressureMonitor.stop()
+        #if DEBUG
+        self.removeDebugMemoryPressureObserver()
+        #endif
         self.statusController?.prepareForAppShutdown()
         self.confettiOverlayController.dismiss()
         self.dismissAppKitWindowsForShutdown()
         self.terminateActiveProcessesForAppShutdown()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        self.cloudSyncCoordinator?.applicationDidBecomeActive()
     }
 
     func runProviderLoginFlow(_ provider: UsageProvider) async {
@@ -422,18 +499,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         await statusController.runLoginFlowFromSettings(provider: provider)
     }
 
+    @objc private func handleSessionLimitResetNotification(_ notification: Notification) {
+        guard let event = notification.object as? SessionLimitResetEvent else { return }
+        guard self.settings?.confettiOnSessionLimitResetsEnabled == true else { return }
+        self.playLimitResetConfetti(
+            provider: event.provider,
+            accountIdentifier: event.accountIdentifier,
+            resetKind: "session")
+    }
+
     @objc private func handleWeeklyLimitResetNotification(_ notification: Notification) {
         guard let event = notification.object as? WeeklyLimitResetEvent else { return }
         guard self.settings?.confettiOnWeeklyLimitResetsEnabled == true else { return }
-        let origin = self.statusController?.celebrationOriginPoint(for: event.provider)
+        self.playLimitResetConfetti(
+            provider: event.provider,
+            accountIdentifier: event.accountIdentifier,
+            resetKind: "weekly")
+    }
+
+    private func playLimitResetConfetti(
+        provider: UsageProvider,
+        accountIdentifier: String,
+        resetKind: String)
+    {
+        let origin = self.statusController?.celebrationOriginPoint(for: provider)
+        let palette = ProviderDescriptorRegistry.descriptor(for: provider).branding.confettiPalette
         self.confettiLogger.info(
             "Triggering confetti",
             metadata: [
-                "provider": event.provider.rawValue,
-                "accountIdentifier": event.accountIdentifier,
+                "provider": provider.rawValue,
+                "accountIdentifier": accountIdentifier,
+                "resetKind": resetKind,
                 "originKnown": origin == nil ? "0" : "1",
             ])
-        self.confettiOverlayController.play(originInScreen: origin)
+        self.confettiOverlayController.play(originInScreen: origin, colors: palette)
     }
 
     /// Use the classic (non-Liquid Glass) app icon on macOS versions before 26.
@@ -469,7 +568,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func ensureStatusController() {
-        if self.statusController != nil { return }
+        if self.statusController != nil {
+            return
+        }
 
         if let store,
            let settings,
@@ -486,6 +587,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 selection,
                 managedCodexAccountCoordinator,
                 codexAccountPromotionCoordinator)
+            if let statusController = self.statusController as? StatusItemController {
+                statusController.cloudSyncState = self.cloudSyncState
+                MenuSwitchFlickerProbe.startIfRequested(controller: statusController)
+            }
             return
         }
 
@@ -512,6 +617,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             fallbackManagedCodexAccountCoordinator,
             fallbackCodexAccountPromotionCoordinator)
     }
+
+    private func trimRebuildableCachesForMemoryPressure() -> MemoryPressureCacheTrimSummary {
+        var summary = MemoryPressureCacheTrimSummary()
+        let statusSummary = self.statusController?.trimRebuildableCachesForMemoryPressure()
+            ?? MemoryPressureCacheTrimSummary()
+        let storeSummary = self.store?.trimRebuildableCachesForMemoryPressure()
+            ?? MemoryPressureCacheTrimSummary()
+        summary.merge(statusSummary)
+        summary.merge(storeSummary)
+        return summary
+    }
+
+    #if DEBUG
+    private func installDebugMemoryPressureObserverIfNeeded() {
+        guard self.debugMemoryPressureObserver == nil else { return }
+        self.debugMemoryPressureObserver = DistributedNotificationCenter.default().addObserver(
+            forName: .codexbarDebugSimulateMemoryPressure,
+            object: nil,
+            queue: .main)
+        { [weak self] notification in
+            let rawLevel = notification.userInfo?["level"] as? String
+            let shouldSeedCaches = notification.userInfo?["seedCaches"] as? String == "1"
+            MainActor.assumeIsolated {
+                self?.handleDebugMemoryPressureNotification(
+                    rawLevel: rawLevel,
+                    shouldSeedCaches: shouldSeedCaches)
+            }
+        }
+    }
+
+    private func removeDebugMemoryPressureObserver() {
+        guard let observer = self.debugMemoryPressureObserver else { return }
+        DistributedNotificationCenter.default().removeObserver(observer)
+        self.debugMemoryPressureObserver = nil
+    }
+
+    private func handleDebugMemoryPressureNotification(rawLevel: String?, shouldSeedCaches: Bool) {
+        let isCritical = rawLevel?.caseInsensitiveCompare("critical") == .orderedSame
+        if shouldSeedCaches {
+            OpenAIDashboardFetcher.seedCachedWebViewsForMemoryPressureProof()
+            self.statusController?.seedRebuildableCachesForMemoryPressureProof()
+            self.store?.seedRebuildableCachesForMemoryPressureProof()
+        }
+        CodexBarLog.logger(LogCategories.memoryPressure).info(
+            "Debug memory pressure notification received",
+            metadata: [
+                "level": isCritical ? "critical" : "warning",
+                "seedCaches": shouldSeedCaches ? "1" : "0",
+            ])
+        self.memoryPressureMonitor.handleMemoryPressureForTesting(isWarning: !isCritical, isCritical: isCritical)
+    }
+    #endif
 
     deinit {
         NotificationCenter.default.removeObserver(self)

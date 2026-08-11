@@ -9,12 +9,32 @@ read_when:
 
 # Antigravity provider
 
+For Google individual, AI Pro, and Ultra accounts blocked by the June 2026 Gemini CLI OAuth
+shutdown, Antigravity is the replacement path for Gemini quota tracking in CodexBar. Launch
+the Antigravity app or run `agy`, sign in, then refresh. See `docs/gemini.md` for the Gemini
+provider migration notes. CodexBar offers the handoff only after an observed Google migration
+signal and never enables or falls back to Antigravity automatically.
+
+To use the `agy` CLI source without keeping the desktop app open, install the CLI first
+(`brew install --cask antigravity-cli`; use `ANTIGRAVITY_CLI_PATH` when it is not on PATH), then
+run `agy` once and sign in. CodexBar keeps the signed-in `agy` local HTTPS server alive briefly
+after each refresh and stops it when idle.
+
 Antigravity supports four usage data sources:
 
 1. The Antigravity 2.0 app's local `language_server` (preferred when the app is open).
 2. The `agy` CLI's embedded HTTPS localhost server (preferred over the IDE because it exposes richer quota data).
 3. The Antigravity IDE extension `language_server` (used after `agy` CLI because current IDE local payloads only expose session/model quota data).
 4. Google OAuth-backed remote usage (explicit OAuth mode, and the account-scoped fallback used for multi-account switching). The OAuth path can store multiple Google accounts through the shared token-account switcher.
+
+## When the Antigravity app is closed
+
+The app-local `language_server` exists only while Antigravity.app is running. With the app closed,
+CodexBar relies on the `agy` CLI HTTPS source or the Google OAuth fallback. Without a signed-in
+`agy`, the OAuth fallback can only prove model availability, so the menu shows an all-100%
+placeholder instead of real quota numbers. A freshly spawned `agy` needs a few seconds for macOS
+keyring authentication before its quota endpoints answer, so the first refresh after a cold start
+can take a few extra seconds while CodexBar waits for readiness; later refreshes reuse the warmed session.
 
 The local and CLI paths both prefer Antigravity's internal `RetrieveUserQuotaSummary` quota payload and may fall back to
 `GetUserStatus`, then `GetCommandModelConfigs`; CodexBar never scrapes the desktop UI or the `agy` TUI.
@@ -33,6 +53,8 @@ it accepts the first account-matching source in Antigravity app -> `agy` CLI -> 
 when CodexBar has a selected/injected Google account or an existing shared credentials file. An all-100%
 `fetchAvailableModels` payload is only accepted after `retrieveUserQuota` echoes bucket fractions; this can be an
 availability-style fallback rather than the full Antigravity quota summary.
+When OAuth identifies the account but quota endpoints deny access, CodexBar shows `Limits not available` instead of an
+empty quota card.
 
 ## OAuth account switching
 
@@ -137,6 +159,10 @@ The fallback can return quota without the account email or plan fields from `Get
 Differences from the desktop local probe:
 
 - The CLI HTTPS endpoint does **not** require `X-Codeium-Csrf-Token`.
+- Before a one-shot CLI invocation launches `agy`, CodexBar spends at most two seconds looking for an already-running,
+  same-user `agy` at the selected binary path and reuses its tokenless local HTTPS endpoint when it returns parseable
+  usage for the selected account. Long-lived app/server refreshes keep using CodexBar's managed session, and
+  CodexBar-owned pids are excluded from external reuse so probe/idle lifecycle accounting stays balanced.
 - Readiness is endpoint-based: CodexBar retries until one of the quota endpoints parses, because fresh `agy`
   processes can bind a port before the quota service is initialized.
 - App runtime uses a bounded warm session: `agy` is kept alive briefly after a refresh, then stopped on idle. CLI runtime

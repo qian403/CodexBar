@@ -15,7 +15,9 @@ struct ProviderPayload: Encodable {
     let credits: CreditsSnapshot?
     let antigravityPlanInfo: AntigravityPlanInfoSummary?
     let openaiDashboard: OpenAIDashboardSnapshot?
+    let diagnostic: String?
     let error: ProviderErrorPayload?
+    let pace: ProviderPacePayload?
 
     private enum CodingKeys: String, CodingKey {
         case provider
@@ -27,7 +29,9 @@ struct ProviderPayload: Encodable {
         case credits
         case antigravityPlanInfo
         case openaiDashboard
+        case diagnostic
         case error
+        case pace
     }
 
     init(
@@ -41,7 +45,9 @@ struct ProviderPayload: Encodable {
         credits: CreditsSnapshot?,
         antigravityPlanInfo: AntigravityPlanInfoSummary?,
         openaiDashboard: OpenAIDashboardSnapshot?,
-        error: ProviderErrorPayload?)
+        error: ProviderErrorPayload?,
+        diagnostic: String? = nil,
+        pace: ProviderPacePayload? = nil)
     {
         self.provider = provider.rawValue
         self.account = account
@@ -53,7 +59,9 @@ struct ProviderPayload: Encodable {
         self.credits = credits
         self.antigravityPlanInfo = antigravityPlanInfo
         self.openaiDashboard = openaiDashboard
+        self.diagnostic = diagnostic
         self.error = error
+        self.pace = pace
     }
 
     init(
@@ -67,7 +75,9 @@ struct ProviderPayload: Encodable {
         credits: CreditsSnapshot?,
         antigravityPlanInfo: AntigravityPlanInfoSummary?,
         openaiDashboard: OpenAIDashboardSnapshot?,
-        error: ProviderErrorPayload?)
+        error: ProviderErrorPayload?,
+        diagnostic: String? = nil,
+        pace: ProviderPacePayload? = nil)
     {
         self.provider = providerID
         self.account = account
@@ -79,8 +89,28 @@ struct ProviderPayload: Encodable {
         self.credits = credits
         self.antigravityPlanInfo = antigravityPlanInfo
         self.openaiDashboard = openaiDashboard
+        self.diagnostic = diagnostic
         self.error = error
+        self.pace = pace
     }
+}
+
+struct ProviderPacePayload: Encodable {
+    let primary: PacePayload?
+    let secondary: PacePayload?
+    let tertiary: PacePayload?
+}
+
+struct PacePayload: Encodable {
+    let stage: String
+    /// Rounded (used − expected); positive = deficit, negative = reserve.
+    let deltaPercent: Double
+    let expectedUsedPercent: Double
+    let willLastToReset: Bool
+    let etaSeconds: TimeInterval?
+    /// Always absent in CLI output; kept for schema parity.
+    let runOutProbability: Double?
+    let summary: String
 }
 
 struct ProviderStatusPayload: Encodable {

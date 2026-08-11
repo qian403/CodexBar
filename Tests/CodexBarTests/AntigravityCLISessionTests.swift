@@ -481,7 +481,11 @@ struct AntigravityCLISessionTests {
         let firstReplacement = Task {
             try await fixture.session.beginProbe(binary: "/new/agy")
         }
-        await fixture.sleeper?.waitForSleeps(1)
+        // Two sleeps register here: the lingering idle-timer sleep (armed by the prior finishProbe;
+        // the fake sleeper does not honor cancellation) and the teardown grace-period sleep. Wait for
+        // both before resuming — waiting for only one lets resumeAll() fire before the grace sleep
+        // parks, stranding it so teardown never completes and the suite hangs to the 120s timeout.
+        await fixture.sleeper?.waitForSleeps(2)
 
         let secondReplacement = Task {
             try await fixture.session.beginProbe(binary: "/new/agy")
@@ -674,9 +678,7 @@ struct AntigravityCLISessionTests {
         defer { close(inheritedFD) }
 
         let outputURL = tempDirectory.appendingPathComponent("result.txt")
-        let scriptURL = tempDirectory.appendingPathComponent("probe.sh")
         let script = """
-        #!/bin/sh
         pwd > \(outputURL.path)
         if [ -e /dev/fd/\(inheritedFD) ] || [ -e /proc/self/fd/\(inheritedFD) ]; then
           echo inherited >> \(outputURL.path)
@@ -684,18 +686,25 @@ struct AntigravityCLISessionTests {
           echo closed >> \(outputURL.path)
         fi
         """
-        // Direct writes close the executable before spawn; atomic replacement can race with exec on Linux.
-        try Data(script.utf8).write(to: scriptURL)
-        #expect(chmod(scriptURL.path, 0o700) == 0)
 
-        let handle = try AntigravityPTYProcessLauncher().launch(binary: scriptURL.path)
+        let handle = try AntigravityPTYProcessLauncher().launch(
+            binary: "/bin/sh",
+            arguments: ["-c", script])
         defer {
             handle.killRoot()
             handle.terminateTree(signal: SIGKILL, knownDescendants: [])
             handle.closePTY()
         }
 
-        for _ in 0..<200 where !FileManager.default.fileExists(atPath: outputURL.path) {
+        for _ in 0..<200 {
+            if FileManager.default.fileExists(atPath: outputURL.path),
+               let output = try? String(contentsOf: outputURL, encoding: .utf8)
+            {
+                let lines = output
+                    .split(separator: "\n")
+                    .map(String.init)
+                if lines.count >= 2, output.hasSuffix("\n") { break }
+            }
             Thread.sleep(forTimeInterval: 0.01)
         }
         let lines = try String(contentsOf: outputURL, encoding: .utf8)

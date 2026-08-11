@@ -23,7 +23,7 @@ struct CodexAccountScopedRefreshGuard: Equatable {
     {
         self.source = source
         self.identity = identity
-        self.accountKey = accountKey
+        self.accountKey = CodexIdentityResolver.normalizeEmail(accountKey)
         self.authFingerprint = CodexAuthFingerprint.normalize(authFingerprint)
     }
 }
@@ -51,6 +51,7 @@ extension UsageStore {
             await self.refreshOpenAIDashboardIfNeeded(
                 force: true,
                 expectedGuard: expectedGuard,
+                bypassCoalescing: true,
                 allowCodexUsageBackfill: true)
             phaseDidChange?(.dashboard)
         }
@@ -67,27 +68,25 @@ extension UsageStore {
     }
 
     @discardableResult
-    func prepareCodexAccountScopedRefreshIfNeeded() -> Bool {
-        let currentGuard = self.freshCodexAccountScopedRefreshGuard(
+    func prepareCodexAccountScopedRefreshIfNeeded(
+        forceInvalidation: Bool = false,
+        currentGuardOverride: CodexAccountScopedRefreshGuard? = nil) -> Bool
+    {
+        let currentGuard = currentGuardOverride ?? self.freshCodexAccountScopedRefreshGuard(
             preferCurrentSnapshot: false,
             allowLastKnownLiveFallback: false)
         let previousGuard = self.lastCodexAccountScopedRefreshGuard
         self.lastCodexAccountScopedRefreshGuard = currentGuard
 
-        guard let previousGuard,
-              !Self.codexScopedRefreshGuardsMatchAccount(previousGuard, currentGuard)
-        else { return false }
+        let accountChanged = previousGuard.map {
+            !Self.codexScopedRefreshGuardsMatchAccount($0, currentGuard)
+        } ?? false
+        guard forceInvalidation || accountChanged else { return false }
 
-        self.snapshots.removeValue(forKey: .codex)
-        self.errors[.codex] = nil
-        self.lastSourceLabels.removeValue(forKey: .codex)
-        self.lastFetchAttempts.removeValue(forKey: .codex)
-        self.accountSnapshots.removeValue(forKey: .codex)
-        self.codexAccountSnapshots = []
-        self.failureGates[.codex]?.reset()
-        self.lastKnownSessionRemaining.removeValue(forKey: .codex)
-        self.lastKnownSessionWindowSource.removeValue(forKey: .codex)
-        self.lastKnownResetSnapshots.removeValue(forKey: .codex)
+        let preserveSessionQuotaTransitionState = !forceInvalidation &&
+            Self.codexSessionQuotaOwnersMatch(previousGuard, currentGuard)
+        self.clearCodexPublishedUsageState(
+            preserveSessionQuotaTransitionState: preserveSessionQuotaTransitionState)
 
         self.credits = nil
         self.lastCreditsError = nil
@@ -100,6 +99,61 @@ extension UsageStore {
 
         self.persistWidgetSnapshot(reason: "codex-account-invalidate")
         return true
+    }
+
+    func clearCodexPublishedUsageState(preserveSessionQuotaTransitionState: Bool = false) {
+        self.snapshots.removeValue(forKey: .codex)
+        self.errors[.codex] = nil
+        self.lastSourceLabels.removeValue(forKey: .codex)
+        self.lastFetchAttempts.removeValue(forKey: .codex)
+        self.accountSnapshots.removeValue(forKey: .codex)
+        // Visible-account rows carry their own owner and are reconciled against the current projection.
+        // Clearing selected-account state must not discard valid sibling rows.
+        self.failureGates[.codex]?.reset()
+        if !preserveSessionQuotaTransitionState {
+            self.requireFreshCodexSessionQuotaBaseline()
+        }
+        self.lastKnownResetSnapshots.removeValue(forKey: .codex)
+        self.lastCodexUsagePublicationGuard = nil
+    }
+
+    @discardableResult
+    func reconcileCodexPublishedUsageOwner(
+        with currentGuard: CodexAccountScopedRefreshGuard,
+        persistWidgetSnapshot: Bool = true) -> Bool
+    {
+        let hasPublishedUsageState = self.snapshots[.codex] != nil ||
+            self.lastKnownResetSnapshots[.codex] != nil ||
+            self.errors[.codex] != nil ||
+            self.lastSourceLabels[.codex] != nil ||
+            self.lastFetchAttempts[.codex] != nil
+        guard hasPublishedUsageState else { return false }
+        guard self.lastCodexUsagePublicationGuard.map({
+            Self.codexScopedRefreshGuardsMatchAccount($0, currentGuard)
+        }) == true
+        else {
+            let preserveSessionQuotaTransitionState = Self.codexSessionQuotaOwnersMatch(
+                self.lastCodexUsagePublicationGuard,
+                currentGuard)
+            self.clearCodexPublishedUsageState(
+                preserveSessionQuotaTransitionState: preserveSessionQuotaTransitionState)
+            if persistWidgetSnapshot {
+                self.persistWidgetSnapshot(reason: "codex-account-invalidate")
+            }
+            return true
+        }
+        return false
+    }
+
+    func reconcileCodexAccountStateForUsageOwner(_ currentGuard: CodexAccountScopedRefreshGuard) {
+        let clearedUsage = self.reconcileCodexPublishedUsageOwner(
+            with: currentGuard,
+            persistWidgetSnapshot: false)
+        let invalidatedAccountState = self.prepareCodexAccountScopedRefreshIfNeeded(
+            currentGuardOverride: currentGuard)
+        if clearedUsage, !invalidatedAccountState {
+            self.persistWidgetSnapshot(reason: "codex-account-invalidate")
+        }
     }
 
     func seedCodexAccountScopedRefreshGuard(
@@ -150,6 +204,8 @@ extension UsageStore {
                     .email)
         case .managedAccount:
             Self.normalizeCodexAccountScopedKey(self.currentManagedCodexRuntimeEmail())
+        case let .profileHome(path):
+            Self.normalizeCodexAccountScopedKey(self.currentProfileCodexRuntimeEmail(path: path))
         }
         return CodexAccountScopedRefreshGuard(
             source: source,
@@ -193,13 +249,12 @@ extension UsageStore {
             currentGuard: currentGuard)
 
         if expectedGuard.identity != .unresolved {
-            guard currentGuard.identity == expectedGuard.identity else { return false }
+            guard Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard) else { return false }
+            guard resultMatchesCurrentAccountKey else { return false }
             if fingerprintsAllowApply {
-                guard case .managedAccount = currentGuard.source else { return true }
-                return resultMatchesCurrentAccountKey
+                return true
             }
             guard canProveNilToCurrentAuth else { return false }
-            guard resultMatchesCurrentAccountKey else { return false }
             return resultIdentity == currentGuard.identity ||
                 (resultAccountKey != nil && resultAccountKey == currentGuard.accountKey)
         }
@@ -212,11 +267,15 @@ extension UsageStore {
         switch currentGuard.source {
         case .liveSystem:
             guard resultIdentity != .unresolved else { return false }
-            if fingerprintsAllowApply { return true }
+            if fingerprintsAllowApply {
+                return true
+            }
             guard canProveNilToCurrentAuth else { return false }
             guard let currentAccountKey = currentGuard.accountKey else { return true }
             return resultAccountKey == currentAccountKey
         case .managedAccount:
+            return false
+        case .profileHome:
             return false
         }
     }
@@ -227,7 +286,7 @@ extension UsageStore {
         guard Self.codexGuardAuthFingerprintMatches(currentGuard, expectedGuard) else { return false }
 
         if expectedGuard.identity != .unresolved {
-            return currentGuard.identity == expectedGuard.identity
+            return Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard)
         }
 
         return currentGuard.identity == .unresolved
@@ -240,7 +299,7 @@ extension UsageStore {
         guard currentGuard.source == expectedGuard.source else { return nil }
         guard Self.codexGuardAuthFingerprintAllowsUsageApply(currentGuard, expectedGuard) else { return nil }
         guard expectedGuard.identity != .unresolved else { return nil }
-        guard currentGuard.identity == expectedGuard.identity else { return nil }
+        guard Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard) else { return nil }
         return currentGuard
     }
 
@@ -253,7 +312,7 @@ extension UsageStore {
         guard currentGuard.source == expectedGuard.source else { return false }
         guard Self.codexGuardAuthFingerprintMatches(currentGuard, expectedGuard) else { return false }
         guard expectedGuard.identity != .unresolved else { return false }
-        return currentGuard.identity == expectedGuard.identity
+        return Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard)
     }
 
     func shouldApplyOpenAIDashboardRefreshGuard(
@@ -266,7 +325,7 @@ extension UsageStore {
         guard Self.codexGuardAuthFingerprintAllowsUsageApply(currentGuard, expectedGuard) else { return false }
 
         if expectedGuard.identity != .unresolved {
-            return currentGuard.identity == expectedGuard.identity
+            return Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard)
         }
 
         guard case .liveSystem = expectedGuard.source else { return false }
@@ -287,7 +346,7 @@ extension UsageStore {
         guard Self.codexGuardAuthFingerprintMatches(currentGuard, expectedGuard) else { return false }
 
         if expectedGuard.identity != .unresolved {
-            return currentGuard.identity == expectedGuard.identity
+            return Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard)
         }
 
         guard case .liveSystem = expectedGuard.source else { return false }
@@ -307,9 +366,11 @@ extension UsageStore {
         guard currentGuard.source == expectedGuard.source else { return false }
 
         if expectedGuard.identity != .unresolved {
-            guard currentGuard.identity == expectedGuard.identity else { return false }
-            return Self.codexGuardAuthFingerprintMatches(currentGuard, expectedGuard) ||
-                Self.codexGuardAuthFingerprintAllowsSameProviderAccount(currentGuard, expectedGuard)
+            if Self.codexGuardIdentityAndEmailMatch(currentGuard, expectedGuard) {
+                return Self.codexGuardAuthFingerprintMatches(currentGuard, expectedGuard) ||
+                    Self.codexGuardAuthFingerprintAllowsUsageApply(currentGuard, expectedGuard)
+            }
+            return Self.codexGuardAuthFingerprintAllowsProviderTransitionCleanup(currentGuard, expectedGuard)
         }
 
         guard case .liveSystem = expectedGuard.source else { return false }
@@ -339,6 +400,8 @@ extension UsageStore {
                 self.settings.codexAccountReconciliationSnapshot.liveSystemAccount?.email)
         case .managedAccount:
             CodexIdentityResolver.normalizeEmail(self.currentManagedCodexRuntimeEmail())
+        case let .profileHome(path):
+            CodexIdentityResolver.normalizeEmail(self.currentProfileCodexRuntimeEmail(path: path))
         }
     }
 
@@ -409,20 +472,26 @@ extension UsageStore {
         let lhsFingerprint = CodexAuthFingerprint.normalize(lhs.authFingerprint)
         let rhsFingerprint = CodexAuthFingerprint.normalize(rhs.authFingerprint)
         guard lhsFingerprint != nil, rhsFingerprint != nil else { return false }
-        guard case .providerAccount = rhs.identity, lhs.identity == rhs.identity else { return false }
+        guard case .providerAccount = rhs.identity,
+              self.codexGuardIdentityAndEmailMatch(lhs, rhs)
+        else { return false }
         guard case .liveSystem = lhs.source else { return true }
-        return lhs.accountKey != nil && lhs.accountKey == rhs.accountKey
+        return true
     }
 
-    private nonisolated static func codexGuardAuthFingerprintAllowsSameProviderAccount(
+    private nonisolated static func codexGuardAuthFingerprintAllowsProviderTransitionCleanup(
         _ lhs: CodexAccountScopedRefreshGuard,
         _ rhs: CodexAccountScopedRefreshGuard) -> Bool
     {
         let lhsFingerprint = CodexAuthFingerprint.normalize(lhs.authFingerprint)
         let rhsFingerprint = CodexAuthFingerprint.normalize(rhs.authFingerprint)
-        guard lhsFingerprint != nil, rhsFingerprint != nil else { return false }
+        guard let lhsFingerprint, let rhsFingerprint, lhsFingerprint != rhsFingerprint else { return false }
         guard case .providerAccount = rhs.identity else { return false }
-        return lhs.identity == rhs.identity
+        guard lhs.identity == rhs.identity else { return false }
+        guard let lhsEmail = CodexIdentityResolver.normalizeEmail(lhs.accountKey),
+              let rhsEmail = CodexIdentityResolver.normalizeEmail(rhs.accountKey)
+        else { return false }
+        return lhsEmail != rhsEmail
     }
 
     nonisolated static func codexScopedRefreshGuardsMatchAccount(
@@ -430,14 +499,29 @@ extension UsageStore {
         _ rhs: CodexAccountScopedRefreshGuard) -> Bool
     {
         guard lhs.source == rhs.source else { return false }
-        if lhs == rhs { return true }
+        if lhs == rhs {
+            guard case .providerAccount = lhs.identity else { return true }
+            return self.codexGuardIdentityAndEmailMatch(lhs, rhs)
+        }
         guard lhs.identity != .unresolved,
-              lhs.identity == rhs.identity,
+              self.codexGuardIdentityAndEmailMatch(lhs, rhs),
               lhs.accountKey == rhs.accountKey
         else {
             return false
         }
         return self.codexGuardAuthFingerprintAllowsUsageApply(lhs, rhs)
+    }
+
+    private nonisolated static func codexGuardIdentityAndEmailMatch(
+        _ lhs: CodexAccountScopedRefreshGuard,
+        _ rhs: CodexAccountScopedRefreshGuard) -> Bool
+    {
+        guard lhs.identity == rhs.identity else { return false }
+        guard case .providerAccount = lhs.identity else { return true }
+        guard let lhsEmail = CodexIdentityResolver.normalizeEmail(lhs.accountKey),
+              let rhsEmail = CodexIdentityResolver.normalizeEmail(rhs.accountKey)
+        else { return false }
+        return lhsEmail == rhsEmail
     }
 
     private nonisolated static func codexUsageResultAccountKeyMatchesCurrentGuard(
@@ -461,6 +545,12 @@ extension UsageStore {
         case let .managedAccount(id):
             guard let account = snapshot.storedAccounts.first(where: { $0.id == id }) else { return nil }
             return CodexAuthFingerprint.fingerprint(homePath: account.managedHomePath)
+        case let .profileHome(path):
+            guard let profileAccount = snapshot.profileHomeAccount(path: path) else {
+                guard let normalizedPath = CodexHomeScope.normalizedHomePath(path) else { return nil }
+                return CodexAuthFingerprint.fingerprint(homePath: normalizedPath)
+            }
+            return CodexAuthFingerprint.normalize(profileAccount.authFingerprint)
         }
     }
 
@@ -507,6 +597,8 @@ extension UsageStore {
                 return nil
             }
             return self.currentManagedCodexRuntimeEmail()
+        case let .profileHome(path):
+            return self.currentProfileCodexRuntimeEmail(path: path)
         }
     }
 
@@ -544,6 +636,12 @@ extension UsageStore {
                 return .unresolved
             }
             return self.settings.codexAccountReconciliationSnapshot.runtimeIdentity(for: activeStoredAccount)
+        case let .profileHome(path):
+            guard let profileAccount = self.settings.codexAccountReconciliationSnapshot.profileHomeAccount(path: path)
+            else {
+                return .unresolved
+            }
+            return self.settings.codexAccountReconciliationSnapshot.runtimeIdentity(for: profileAccount)
         }
     }
 
@@ -562,6 +660,12 @@ extension UsageStore {
                 return .unresolved
             }
             return self.settings.codexAccountReconciliationSnapshot.runtimeIdentity(for: activeStoredAccount)
+        case let .profileHome(path):
+            guard let profileAccount = self.settings.codexAccountReconciliationSnapshot.profileHomeAccount(path: path)
+            else {
+                return .unresolved
+            }
+            return self.settings.codexAccountReconciliationSnapshot.runtimeIdentity(for: profileAccount)
         }
     }
 
@@ -576,22 +680,34 @@ extension UsageStore {
             self.settings.codexAccountReconciliationSnapshot.runtimeEmail(for: activeStoredAccount))
     }
 
+    func currentProfileCodexRuntimeEmail(path: String) -> String? {
+        guard let profileAccount = self.settings.codexAccountReconciliationSnapshot.profileHomeAccount(path: path)
+        else {
+            return nil
+        }
+        return Self.normalizeCodexAccountScopedEmail(profileAccount.email)
+    }
+
     private func clearCodexOpenAIWebStateForAccountTransition(targetEmail: String?) {
         self.invalidateOpenAIDashboardRefreshTask()
         if self.settings.codexCookieSource.isEnabled,
            let normalizedTarget = Self.normalizeCodexAccountScopedEmail(targetEmail)
         {
-            let previous = self.lastOpenAIDashboardTargetEmail
+            let scope = self.codexCookieCacheScopeForOpenAIWeb()
+            let isolationKey = Self.openAIWebTargetIsolationKey(email: normalizedTarget, scope: scope)
+            let previousIsolationKey = self.lastOpenAIDashboardTargetIsolationKey
             self.lastOpenAIDashboardTargetEmail = normalizedTarget
-            if let previous, !previous.isEmpty, previous != normalizedTarget {
+            self.lastOpenAIDashboardTargetIsolationKey = isolationKey
+            if let previousIsolationKey, previousIsolationKey != isolationKey {
                 self.openAIWebAccountDidChange = true
-                self.openAIDashboardCookieImportStatus = "Codex account changed; importing browser cookies…"
+                self.openAIDashboardCookieImportStatus = L("Codex account changed; importing browser cookies…")
             } else {
                 self.openAIDashboardCookieImportStatus = nil
             }
             self.openAIDashboardRequiresLogin = true
         } else {
             self.lastOpenAIDashboardTargetEmail = Self.normalizeCodexAccountScopedEmail(targetEmail)
+            self.lastOpenAIDashboardTargetIsolationKey = nil
             self.openAIWebAccountDidChange = false
             self.openAIDashboardRequiresLogin = false
             self.openAIDashboardCookieImportStatus = nil

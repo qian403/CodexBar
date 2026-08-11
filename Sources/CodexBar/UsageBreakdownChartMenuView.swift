@@ -4,6 +4,12 @@ import SwiftUI
 
 @MainActor
 struct UsageBreakdownChartMenuView: View {
+    enum PresentationState: Equatable {
+        case empty
+        case totalsOnly
+        case chart
+    }
+
     private struct Point: Identifiable {
         let id: String
         let date: Date
@@ -19,23 +25,49 @@ struct UsageBreakdownChartMenuView: View {
     }
 
     private let breakdown: [OpenAIDashboardDailyBreakdown]
+    private let now: Date
+    private let calendar: Calendar
     private let width: CGFloat
     @State private var selectedDayKey: String?
 
-    init(breakdown: [OpenAIDashboardDailyBreakdown], width: CGFloat) {
+    init(
+        breakdown: [OpenAIDashboardDailyBreakdown],
+        now: Date = Date(),
+        calendar: Calendar = .current,
+        width: CGFloat)
+    {
         self.breakdown = breakdown
+        self.now = now
+        self.calendar = calendar
         self.width = width
     }
 
     var body: some View {
-        let model = Self.makeModel(from: self.breakdown)
+        let summary = OpenAIDashboardDailyBreakdown.recentUsageSummary(
+            from: self.breakdown,
+            now: self.now,
+            calendar: self.calendar)
+        let model = Self.makeModel(from: summary.daily)
+        let presentationState = Self.presentationState(
+            hasSummary: !summary.daily.isEmpty,
+            hasChartPoints: !model.points.isEmpty)
         VStack(alignment: .leading, spacing: 10) {
-            if model.points.isEmpty {
+            if presentationState != .empty {
+                HStack(alignment: .firstTextBaseline) {
+                    self.summaryMetric(title: L("Today"), credits: summary.todayCredits)
+                    Spacer(minLength: 12)
+                    self.summaryMetric(
+                        title: String(format: L("Last %d days"), summary.historyDays),
+                        credits: summary.totalCredits)
+                }
+            }
+
+            if presentationState == .empty {
                 Text(L("No usage breakdown data."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .accessibilityLabel(L("No usage breakdown data available."))
-            } else {
+            } else if presentationState == .chart {
                 Chart {
                     ForEach(model.points) { point in
                         BarMark(
@@ -55,12 +87,16 @@ struct UsageBreakdownChartMenuView: View {
                 .chartForegroundStyleScale(domain: model.services, range: model.serviceColors)
                 .chartYAxis(.hidden)
                 .chartXAxis {
-                    AxisMarks(values: model.axisDates) { _ in
+                    AxisMarks(values: model.axisDates) { value in
                         AxisGridLine().foregroundStyle(Color.clear)
                         AxisTick().foregroundStyle(Color.clear)
-                        AxisValueLabel(format: .dateTime.month(.abbreviated).day())
-                            .font(.caption2)
-                            .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                        if let date = value.as(Date.self) {
+                            AxisValueLabel(anchor: Self.xAxisLabelAnchor(for: date, axisDates: model.axisDates)) {
+                                Text(date, format: .dateTime.month(.abbreviated).day())
+                                    .font(.caption2)
+                                    .foregroundStyle(Color(nsColor: .tertiaryLabelColor))
+                            }
+                        }
                     }
                 }
                 .chartLegend(.hidden)
@@ -133,6 +169,12 @@ struct UsageBreakdownChartMenuView: View {
         .frame(minWidth: self.width, maxWidth: .infinity, alignment: .leading)
     }
 
+    static func presentationState(hasSummary: Bool, hasChartPoints: Bool) -> PresentationState {
+        if hasChartPoints { return .chart }
+        if hasSummary { return .totalsOnly }
+        return .empty
+    }
+
     private struct Model {
         let points: [Point]
         let breakdownByDayKey: [String: OpenAIDashboardDailyBreakdown]
@@ -153,6 +195,25 @@ struct UsageBreakdownChartMenuView: View {
     }
 
     private static let selectionBandColor = Color(nsColor: .labelColor).opacity(0.1)
+
+    private func summaryMetric(title: String, credits: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(Self.creditsString(credits))
+                .font(.subheadline)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private static func creditsString(_ credits: Double?) -> String {
+        guard let credits, credits.isFinite else { return "—" }
+        let value = credits.formatted(.number.precision(.fractionLength(0...2)))
+        return "\(value) \(L("credits"))"
+    }
 
     private static func makeModel(from breakdown: [OpenAIDashboardDailyBreakdown]) -> Model {
         let sorted = OpenAIDashboardDailyBreakdown.removingSkillUsageServices(from: breakdown)
@@ -262,6 +323,16 @@ struct UsageBreakdownChartMenuView: View {
         return [firstDate, lastDate]
     }
 
+    private static func xAxisLabelAnchor(for date: Date, axisDates: [Date]) -> UnitPoint {
+        if let first = axisDates.first, Calendar.current.isDate(date, inSameDayAs: first) {
+            return .topLeading
+        }
+        if let last = axisDates.last, Calendar.current.isDate(date, inSameDayAs: last) {
+            return .topTrailing
+        }
+        return .top
+    }
+
     private static func dateFromDayKey(_ key: String) -> Date? {
         let parts = key.split(separator: "-")
         guard parts.count == 3,
@@ -291,14 +362,6 @@ struct UsageBreakdownChartMenuView: View {
         let date = model.dayDates[index].date
         guard let x = proxy.position(forX: date) else { return nil }
 
-        func xForIndex(_ idx: Int) -> CGFloat? {
-            guard idx >= 0, idx < model.dayDates.count else { return nil }
-            return proxy.position(forX: model.dayDates[idx].date)
-        }
-
-        let xPrev = xForIndex(index - 1)
-        let xNext = xForIndex(index + 1)
-
         if model.dayDates.count <= 1 {
             return CGRect(
                 x: plotFrame.origin.x,
@@ -307,24 +370,14 @@ struct UsageBreakdownChartMenuView: View {
                 height: plotFrame.height)
         }
 
-        let leftInPlot: CGFloat = if let xPrev {
-            (xPrev + x) / 2
-        } else if let xNext {
-            x - (xNext - x) / 2
-        } else {
-            x - 8
-        }
+        // Use the calendar day slot width (always 1 day on the time axis) so the band is the
+        // same size for every bar regardless of gaps in the data.
+        let nextDayX = proxy.position(forX: ChartBarHoverSelection.nextCalendarDay(after: date)) ?? (x + 20)
+        let slotWidth = abs(nextDayX - x)
+        let barHalfWidth = slotWidth * 0.25 + 2
 
-        let rightInPlot: CGFloat = if let xNext {
-            (xNext + x) / 2
-        } else if let xPrev {
-            x + (x - xPrev) / 2
-        } else {
-            x + 8
-        }
-
-        let left = plotFrame.origin.x + min(leftInPlot, rightInPlot)
-        let right = plotFrame.origin.x + max(leftInPlot, rightInPlot)
+        let left = plotFrame.origin.x + x - barHalfWidth
+        let right = plotFrame.origin.x + x + barHalfWidth
         return CGRect(x: left, y: plotFrame.origin.y, width: right - left, height: plotFrame.height)
     }
 
@@ -346,6 +399,24 @@ struct UsageBreakdownChartMenuView: View {
         let xInPlot = location.x - plotFrame.origin.x
         guard let date: Date = proxy.value(atX: xInPlot) else { return }
         guard let nearest = self.nearestDayKey(to: date, model: model) else { return }
+
+        // Stay on the last selected bar when cursor is in the gap between bars; only switch
+        // selection when the cursor is over the bar's own visual body.
+        // Skip this gate for single-day charts: no gap exists, and selectionBandRect
+        // already covers the full plot width in that case.
+        if model.selectableDayDates.count > 1,
+           let nearestEntry = model.selectableDayDates.first(where: { $0.dayKey == nearest }),
+           let barX = proxy.position(forX: nearestEntry.date)
+        {
+            let nextDayX = proxy.position(forX: ChartBarHoverSelection.nextCalendarDay(after: nearestEntry.date)) ??
+                (barX + 20)
+            let slotWidth = abs(nextDayX - barX)
+            guard ChartBarHoverSelection.accepts(
+                distanceFromBarCenter: abs(location.x - (plotFrame.origin.x + barX)),
+                barHalfWidth: slotWidth * 0.25 + 2,
+                selectableCount: model.selectableDayDates.count)
+            else { return }
+        }
 
         if self.selectedDayKey != nearest {
             self.selectedDayKey = nearest

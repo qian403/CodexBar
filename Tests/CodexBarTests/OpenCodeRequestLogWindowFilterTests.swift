@@ -8,7 +8,7 @@ final class OpenCodeRequestLogWindowFilterTests: XCTestCase {
             self.entry(model: "gpt-5", timestamp: 2),
             self.entry(model: "claude-opus-4-7", timestamp: 1),
         ]
-        let selected: Set<String> = ["claude-opus-4-7"]
+        let selected: Set = ["claude-opus-4-7"]
 
         let filtered = self.filter(entries: entries, selected: selected)
 
@@ -35,7 +35,7 @@ final class OpenCodeRequestLogWindowFilterTests: XCTestCase {
             self.entry(model: "claude-opus-4-7", timestamp: 2),
             self.entry(model: "gpt-5", timestamp: 3),
         ]
-        let selected: Set<String> = ["gpt-5", "claude-opus-4-7"]
+        let selected: Set = ["gpt-5", "claude-opus-4-7"]
 
         let filtered = self.filter(entries: entries, selected: selected)
 
@@ -51,7 +51,7 @@ final class OpenCodeRequestLogWindowFilterTests: XCTestCase {
             self.entry(model: "gpt-5", timestamp: 1),
             self.entry(model: "unknown-model", timestamp: 2),
         ]
-        let selected: Set<String> = ["gpt-5"]
+        let selected: Set = ["gpt-5"]
 
         let filtered = self.filter(entries: entries, selected: selected)
 

@@ -1,7 +1,9 @@
 #if canImport(Darwin)
 import Darwin
-#else
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 import Foundation
 
@@ -111,7 +113,7 @@ protocol AntigravityCLISessionLaunchLocking: Sendable {
 /// with an idle timer so CodexBar does not run an IDE backend forever.
 actor AntigravityCLISession {
     static let shared = AntigravityCLISession()
-    private static let log = CodexBarLog.logger(LogCategories.antigravity)
+    private static let log = CodexBarLog.logger(LogCategories.provider(.antigravity))
 
     enum ResetCause: Int {
         case deferred
@@ -847,6 +849,10 @@ struct AntigravityPTYProcessLauncher: AntigravityCLIProcessLaunching {
     }
 
     func launch(binary: String) throws -> any AntigravityCLIProcessHandle {
+        try self.launch(binary: binary, arguments: [])
+    }
+
+    func launch(binary: String, arguments: [String]) throws -> any AntigravityCLIProcessHandle {
         var primaryFD: Int32 = -1
         var secondaryFD: Int32 = -1
         var win = winsize(ws_row: 50, ws_col: 160, ws_xpixel: 0, ws_ypixel: 0)
@@ -878,10 +884,16 @@ struct AntigravityPTYProcessLauncher: AntigravityCLIProcessLaunching {
 
         let homeDirectory = NSHomeDirectory()
         _ = homeDirectory.withCString { path in
-            posix_spawn_file_actions_addchdir_np(&fileActions, path)
+            PosixSpawnFileActionsCompatibility.addChangeDirectory(&fileActions, path: path)
         }
-        #if !canImport(Darwin)
-        posix_spawn_file_actions_addclosefrom_np(&fileActions, 3)
+        #if canImport(Glibc) || canImport(Musl)
+        do {
+            try PosixSpawnFileActionsCloseFrom.addCloseFrom(&fileActions, startingAt: 3)
+        } catch {
+            try? primaryHandle.close()
+            try? secondaryHandle.close()
+            throw AntigravityCLISession.SessionError.launchFailed(error.localizedDescription)
+        }
         #endif
 
         #if canImport(Darwin)
@@ -909,7 +921,8 @@ struct AntigravityPTYProcessLauncher: AntigravityCLIProcessLaunching {
         env["PWD"] = NSHomeDirectory()
         env["TERM"] = "xterm-256color"
 
-        let cArgs: [UnsafeMutablePointer<CChar>?] = [strdup(binary), nil]
+        var cArgs = ([binary] + arguments).map { strdup($0) as UnsafeMutablePointer<CChar>? }
+        cArgs.append(nil)
         defer {
             for arg in cArgs {
                 if let arg {
@@ -1092,6 +1105,33 @@ final class AntigravitySpawnedPTYProcessHandle: AntigravityCLIProcessHandle, @un
 // MARK: - Production Stale Session Identity + Storage
 
 struct AntigravityProcessIdentityProvider: AntigravityCLIProcessIdentityProviding {
+    static var currentUserID: UInt32 {
+        UInt32(getuid())
+    }
+
+    func ownerUserID(for pid: pid_t) -> UInt32? {
+        #if canImport(Darwin)
+        var info = proc_bsdinfo()
+        let size = proc_pidinfo(
+            pid,
+            PROC_PIDTBSDINFO,
+            0,
+            &info,
+            Int32(MemoryLayout<proc_bsdinfo>.stride))
+        guard size == Int32(MemoryLayout<proc_bsdinfo>.stride) else { return nil }
+        return info.pbi_uid
+        #else
+        guard let status = try? String(contentsOfFile: "/proc/\(pid)/status", encoding: .utf8),
+              let uidLine = status.split(separator: "\n").first(where: { $0.hasPrefix("Uid:") }),
+              let owner = uidLine.split(whereSeparator: \.isWhitespace).dropFirst().first,
+              let userID = UInt32(owner)
+        else {
+            return nil
+        }
+        return userID
+        #endif
+    }
+
     func identity(for pid: pid_t) -> AntigravityCLIProcessIdentity? {
         #if canImport(Darwin)
         var pathBuffer = [CChar](repeating: 0, count: 4096)

@@ -59,16 +59,24 @@ extension MiMoUsageSnapshot {
             let usedText = Self.fullCountString(self.tokenUsed)
             let limitText = Self.fullCountString(self.tokenLimit)
             let resetDesc = "\(usedText) / \(limitText) Credits"
+            // Populate windowMinutes so the plan-utilization history + pace forecast engine
+            // (which requires a windowed RateWindow) treats the monthly plan quota like the
+            // Codex/Claude windows. Only when there's a real period end to reset against.
+            let windowMinutes = self.planPeriodEnd == nil
+                ? nil
+                : ProviderPaceCapability.monthlyWindowSentinelMinutes
             return RateWindow(
                 usedPercent: usedPercent,
-                windowMinutes: nil,
+                windowMinutes: windowMinutes,
                 resetsAt: self.planPeriodEnd,
                 resetDescription: resetDesc)
         }()
 
         let planLabel: String? = {
             guard let planCode = self.planCode else { return nil }
-            return planCode.capitalized
+            // Local fallback summaries are already display-formatted; title-casing them corrupts compact units
+            // such as `1.5k` and `stale 34d`. API plan codes still use the normal title-cased presentation.
+            return includeBalance ? planCode.capitalized : planCode
         }()
 
         let identity = ProviderIdentitySnapshot(
@@ -81,7 +89,9 @@ extension MiMoUsageSnapshot {
             primary: tokenWindow,
             secondary: nil,
             tertiary: nil,
-            mimoUsage: includeBalance ? self : nil,
+            details: includeBalance ? [.makeSection(title: "Credits", rows: [
+                .makeRow(label: "Balance", value: self.balanceDetail),
+            ])] : [],
             updatedAt: self.updatedAt,
             identity: identity)
     }

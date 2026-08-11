@@ -49,6 +49,28 @@ struct ProviderEndpointOverrideValidator {
         return url
     }
 
+    func validatedURLAllowingLoopbackHTTP(_ raw: String?) -> URL? {
+        self.validatedURL(raw, allowingHTTPFor: Self.isLoopbackHost)
+    }
+
+    func validatedURLAllowingPrivateNetworkHTTP(_ raw: String?) -> URL? {
+        self.validatedURL(raw, allowingHTTPFor: Self.isPrivateNetworkHost)
+    }
+
+    private func validatedURL(_ raw: String?, allowingHTTPFor isAllowedHTTPHost: (String) -> Bool) -> URL? {
+        guard let raw,
+              Self.hasExplicitURLScheme(raw),
+              let url = URL(string: raw),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "https" || scheme == "http",
+              url.user == nil,
+              url.password == nil,
+              let host = self.validatedDecodedHost(for: url, policy: .allowAnyHTTPSHost),
+              scheme == "https" || isAllowedHTTPHost(host)
+        else { return nil }
+        return url
+    }
+
     static func normalizedHTTPSURL(from raw: String) -> URL? {
         let url = if Self.hasExplicitURLScheme(raw) {
             URL(string: raw)
@@ -94,6 +116,94 @@ struct ProviderEndpointOverrideValidator {
         let scheme = raw[..<colonIndex]
         guard let first = scheme.first, first.isLetter else { return false }
         return scheme.dropFirst().allSatisfy { $0.isLetter || $0.isNumber || ["+", "-", "."].contains($0) }
+    }
+
+    private static func isLoopbackHost(_ host: String) -> Bool {
+        if host == "localhost" || host == "::1" { return true }
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              let first = UInt8(octets[0]),
+              octets.dropFirst().allSatisfy({ UInt8($0) != nil })
+        else { return false }
+        return first == 127
+    }
+
+    private static func isPrivateNetworkHost(_ host: String) -> Bool {
+        if self.isLoopbackHost(host) {
+            return true
+        }
+
+        let hostname = host.hasSuffix(".") ? String(host.dropLast()) : host
+        if hostname.hasSuffix(".local"), hostname.count > ".local".count {
+            return true
+        }
+
+        if let octets = Self.ipv4Octets(host) {
+            return octets[0] == 10 ||
+                (octets[0] == 172 && (16...31).contains(octets[1])) ||
+                (octets[0] == 192 && octets[1] == 168) ||
+                (octets[0] == 169 && octets[1] == 254)
+        }
+
+        guard Self.isValidIPv6Address(host),
+              let firstGroup = host.split(separator: ":", omittingEmptySubsequences: false).first,
+              !firstGroup.isEmpty,
+              let firstValue = UInt16(firstGroup, radix: 16)
+        else { return false }
+
+        return firstValue & 0xFE00 == 0xFC00 || firstValue & 0xFFC0 == 0xFE80
+    }
+
+    private static func ipv4Octets(_ host: String) -> [UInt8]? {
+        let components = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4 else { return nil }
+
+        var octets: [UInt8] = []
+        octets.reserveCapacity(4)
+        for component in components {
+            guard !component.isEmpty,
+                  component.utf8.allSatisfy({ (48...57).contains($0) }),
+                  component == "0" || component.first != "0",
+                  let octet = UInt8(component)
+            else { return nil }
+            octets.append(octet)
+        }
+        return octets
+    }
+
+    private static func isValidIPv6Address(_ host: String) -> Bool {
+        guard host.contains(":") else { return false }
+
+        var address = host
+        if address.contains(".") {
+            guard let lastColon = address.lastIndex(of: ":"),
+                  Self.ipv4Octets(String(address[address.index(after: lastColon)...])) != nil
+            else { return false }
+            address.replaceSubrange(address.index(after: lastColon)..., with: "0:0")
+        }
+
+        let compressedParts = address.components(separatedBy: "::")
+        guard compressedParts.count <= 2 else { return false }
+        let groupCounts = compressedParts.map(Self.ipv6GroupCount)
+        guard groupCounts.allSatisfy({ $0 != nil }) else { return false }
+        let groupCount = groupCounts.compactMap(\.self).reduce(0, +)
+
+        return compressedParts.count == 2 ? groupCount < 8 : groupCount == 8
+    }
+
+    private static func ipv6GroupCount(_ part: String) -> Int? {
+        if part.isEmpty {
+            return 0
+        }
+        let groups = part.split(separator: ":", omittingEmptySubsequences: false)
+        guard groups.allSatisfy({ group in
+            (1...4).contains(group.utf8.count) && group.utf8.allSatisfy(Self.isASCIIHexDigit)
+        }) else { return nil }
+        return groups.count
+    }
+
+    private static func isASCIIHexDigit(_ byte: UInt8) -> Bool {
+        (48...57).contains(byte) || (65...70).contains(byte) || (97...102).contains(byte)
     }
 
     private func hostAuthority(host: String, port: Int?) -> String {

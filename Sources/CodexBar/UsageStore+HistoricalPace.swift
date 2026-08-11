@@ -10,10 +10,9 @@ extension UsageStore {
         guard window.remainingPercent > 0 else { return nil }
         let resolved: UsagePace?
         let workDays = self.settings.weeklyProgressWorkDays
-        // Codex can refine pace with historical samples because its dashboard exposes enough weekly history to build
-        // an account-scoped usage curve. Other providers should not need a hard-coded allowlist: if their RateWindow
-        // includes a reset time and window duration, the generic linear pace calculation is already defensible.
-        if provider == .codex, self.settings.historicalTrackingEnabled {
+        // Provider-specific by design: only Codex's dashboard yields an account-scoped daily curve for learned pace;
+        // other providers use the generic linear window calculation.
+        if provider == .codex, self.settings.historicalTrackingEnabled, workDays == nil {
             let codexAccountKey = self.codexOwnershipContext().canonicalKey
             if self.codexHistoricalDatasetAccountKey == codexAccountKey,
                let historical = CodexHistoricalPaceEvaluator.evaluate(
@@ -25,17 +24,42 @@ extension UsageStore {
             } else {
                 resolved = UsagePace.weekly(window: window, now: now, defaultWindowMinutes: 10080, workDays: workDays)
             }
+        } else if provider == .codex, self.settings.historicalTrackingEnabled {
+            // An explicit work-day schedule is the user's declared plan and takes precedence over learned history.
+            // Keep collecting history in the background so Automatic can resume historical pacing immediately.
+            resolved = UsagePace.weekly(window: window, now: now, defaultWindowMinutes: 10080, workDays: workDays)
         } else {
             // Generic providers must carry an explicit window duration. Using the 10080-minute fallback for
             // windows without windowMinutes would fabricate a weekly pace for non-weekly windows
             // (e.g. Factory monthly with only resetsAt).
             guard window.windowMinutes != nil else { return nil }
-            resolved = UsagePace.weekly(window: window, now: now, defaultWindowMinutes: 10080, workDays: workDays)
+            // Expand a monthly sentinel to the real calendar cycle before scoring. The menu card and the
+            // CLI both resolve first, so skipping it here would score a billing period as a flat 30 days
+            // and disagree with them — and a 31-day cycle would exceed the sentinel outright, dropping the
+            // pace for the first day of every long month.
+            let paceWindow = ProviderDescriptorRegistry.descriptor(for: provider)
+                .pace
+                .resolvedResetWindowForPace(window)
+            resolved = UsagePace.weekly(window: paceWindow, now: now, defaultWindowMinutes: 10080, workDays: workDays)
         }
 
         guard let resolved else { return nil }
         guard resolved.expectedUsedPercent >= Self.minimumPaceExpectedPercent else { return nil }
         return resolved
+    }
+
+    /// Signed pace delta (`+11%`, `-8%`, `0%`) for a menu-bar layout pace token, or nil when the window
+    /// carries no pace-capable metadata. Shared by the status item and the layout editor preview so both
+    /// resolve pace through the same historical/work-day settings as the menu card.
+    func menuBarLayoutPaceText(
+        provider: UsageProvider,
+        window: RateWindow?,
+        now: Date = .init())
+        -> String?
+    {
+        window
+            .flatMap { self.weeklyPace(provider: provider, window: $0, now: now) }
+            .flatMap { MenuBarDisplayText.paceText(pace: $0) }
     }
 
     func recordCodexHistoricalSampleIfNeeded(snapshot: UsageSnapshot) {

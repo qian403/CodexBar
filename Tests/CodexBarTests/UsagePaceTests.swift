@@ -42,6 +42,36 @@ struct UsagePaceTests {
         #expect(pace.etaSeconds == nil)
         #expect(pace.runOutProbability == nil)
         #expect(pace.stage == .farBehind)
+        #expect(abs((pace.speedMultiplierToReset ?? 0) - 14.25) < 0.01)
+    }
+
+    @Test
+    func `weekly pace speed headroom uses remaining burn capacity`() throws {
+        let now = Date(timeIntervalSince1970: 0)
+        let window = RateWindow(
+            usedPercent: 70,
+            windowMinutes: 10080,
+            resetsAt: now.addingTimeInterval(0.7 * 24 * 3600),
+            resetDescription: nil)
+
+        let pace = try #require(UsagePace.weekly(window: window, now: now))
+
+        #expect(abs(pace.expectedUsedPercent - 90) < 0.01)
+        #expect(pace.willLastToReset)
+        #expect(abs((pace.speedMultiplierToReset ?? 0) - 3.857) < 0.01)
+    }
+
+    @Test
+    func `historical pace speed headroom uses projected remaining usage`() {
+        let pace = UsagePace.historical(
+            expectedUsedPercent: 45,
+            actualUsedPercent: 20,
+            etaSeconds: nil,
+            willLastToReset: true,
+            runOutProbability: 0,
+            projectedRemainingUsage: 20)
+
+        #expect(pace.speedMultiplierToReset == 4)
     }
 
     @Test
@@ -464,6 +494,23 @@ struct UsagePaceTests {
         // All should produce identical expected values (linear)
         #expect(abs(paceNil.expectedUsedPercent - paceDefault.expectedUsedPercent) < 0.01)
         #expect(abs(pace7.expectedUsedPercent - paceDefault.expectedUsedPercent) < 0.01)
+    }
+
+    @Test
+    func `workdays off linear weekly pace keeps deficit sign`() throws {
+        let now = Date(timeIntervalSince1970: 0)
+        let window = RateWindow(
+            usedPercent: 88,
+            windowMinutes: 10080,
+            resetsAt: now.addingTimeInterval(2 * 24 * 3600 + 19 * 3600),
+            resetDescription: nil)
+
+        let pace = try #require(UsagePace.weekly(window: window, now: now, workDays: nil))
+
+        #expect(abs(pace.expectedUsedPercent - (101.0 / 168.0 * 100.0)) < 0.01)
+        #expect(pace.deltaPercent > 25)
+        #expect(pace.stage == .farAhead)
+        #expect(pace.willLastToReset == false)
     }
 
     @Test

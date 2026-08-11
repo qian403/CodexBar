@@ -1,8 +1,41 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
+resolve_package_signing_mode() {
+  local requested="${CODEXBAR_SIGNING:-adhoc}"
+  case "$requested" in
+    adhoc|identity) ;;
+    *)
+      echo "ERROR: Unsupported CODEXBAR_SIGNING: $requested (expected adhoc or identity)" >&2
+      return 1
+      ;;
+  esac
+  SIGNING_MODE="$requested"
+}
+
+verify_no_quarantine_attribute() {
+  local bundle="$1"
+  local quarantined
+  quarantined="$(xattr -r -p com.apple.quarantine "$bundle" 2>/dev/null || true)"
+  if [[ -n "$quarantined" ]]; then
+    echo "ERROR: Packaged app still has com.apple.quarantine: ${bundle}" >&2
+    return 1
+  fi
+}
+
+verify_packaged_app_integrity() {
+  local bundle="$1"
+  local sparkle="$bundle/Contents/Frameworks/Sparkle.framework"
+
+  verify_no_quarantine_attribute "$bundle" || return 1
+  codesign --verify --deep --strict --verbose=2 "$sparkle" || return 1
+  codesign --verify --deep --strict --verbose=2 "$bundle" || return 1
+}
+
 CONF=${1:-release}
 ALLOW_LLDB=${CODEXBAR_ALLOW_LLDB:-0}
-SIGNING_MODE=${CODEXBAR_SIGNING:-}
+SIGNING_MODE=
+resolve_package_signing_mode
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$ROOT"
 LOWER_CONF=$(printf "%s" "$CONF" | tr '[:upper:]' '[:lower:]')
@@ -209,6 +242,36 @@ if [[ "$ALLOW_LLDB" == "1" && "$LOWER_CONF" != "debug" ]]; then
   echo "ERROR: CODEXBAR_ALLOW_LLDB requires debug configuration" >&2
   exit 1
 fi
+# iCloud sync (CloudKit) requires restricted entitlements authorized by an embedded
+# Developer ID provisioning profile. Only identity-signed release builds of the primary
+# bundle ID carry them; adhoc/debug builds run with sync unavailable.
+PROVISIONING_PROFILE_SOURCE="$ROOT/Scripts/profiles/CodexBar-DeveloperID.provisionprofile"
+EMBED_PROVISIONING_PROFILE=0
+ICLOUD_ENTITLEMENT_KEYS=""
+if [[ "$SIGNING_MODE" == "identity" && "$LOWER_CONF" == "release" && "$BUNDLE_ID" == "com.steipete.codexbar" ]]; then
+  if [[ ! -f "$PROVISIONING_PROFILE_SOURCE" ]]; then
+    echo "ERROR: Missing $PROVISIONING_PROFILE_SOURCE (required for iCloud entitlements in release builds)" >&2
+    exit 1
+  fi
+  EMBED_PROVISIONING_PROFILE=1
+  ICLOUD_ENTITLEMENT_KEYS=$(cat <<ICLOUD
+    <key>com.apple.application-identifier</key>
+    <string>${APP_TEAM_ID}.${BUNDLE_ID}</string>
+    <key>com.apple.developer.team-identifier</key>
+    <string>${APP_TEAM_ID}</string>
+    <key>com.apple.developer.icloud-services</key>
+    <array>
+        <string>CloudKit</string>
+    </array>
+    <key>com.apple.developer.icloud-container-identifiers</key>
+    <array>
+        <string>iCloud.${BUNDLE_ID}</string>
+    </array>
+    <key>com.apple.developer.icloud-container-environment</key>
+    <string>Production</string>
+ICLOUD
+)
+fi
 cat > "$APP_ENTITLEMENTS" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -218,6 +281,7 @@ cat > "$APP_ENTITLEMENTS" <<PLIST
     <array>
         <string>${APP_GROUP_ID}</string>
     </array>
+${ICLOUD_ENTITLEMENT_KEYS}
     $(if [[ "$ALLOW_LLDB" == "1" ]]; then echo "    <key>com.apple.security.get-task-allow</key><true/>"; fi)
 </dict>
 </plist>
@@ -261,6 +325,19 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CodexBuildTimestamp</key><string>${BUILD_TIMESTAMP}</string>
     <key>CodexGitCommit</key><string>${GIT_COMMIT}</string>
     <key>CodexBarTeamID</key><string>${APP_TEAM_ID}</string>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>com.steipete.codexbar.menu-layout-item</string>
+            <key>UTTypeDescription</key><string>CodexBar menu bar layout token</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+            <key>UTTypeTagSpecification</key>
+            <dict/>
+        </dict>
+    </array>
 </dict>
 </plist>
 PLIST
@@ -322,15 +399,31 @@ install_binary() {
   verify_binary_arches "$dest" "${ARCH_LIST[@]}"
 }
 
+strip_release_binary() {
+  local binary="$1"
+  if [[ "$LOWER_CONF" != "release" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$binary" ]]; then
+    return 0
+  fi
+  xcrun strip -x "$binary"
+}
+
 ensure_widget_extension_project() {
   local spec="$ROOT/WidgetExtension/project.yml"
   local project_dir="$ROOT/WidgetExtension/CodexBarWidgetExtension.xcodeproj"
-  if command -v xcodegen >/dev/null 2>&1; then
-    xcodegen generate --spec "$spec" --project "$ROOT/WidgetExtension" --quiet
-  elif [[ ! -f "$project_dir/project.pbxproj" ]]; then
+  if [[ -f "$project_dir/project.pbxproj" ]]; then
+    return
+  fi
+  if ! command -v xcodegen >/dev/null 2>&1; then
     echo "ERROR: Missing ${project_dir}; install xcodegen or restore the generated project." >&2
     exit 1
   fi
+
+  # The tracked project is authoritative. Regenerating it during packaging records the checkout
+  # directory's spelling in a package file reference and leaves release worktrees dirty.
+  xcodegen generate --spec "$spec" --project "$ROOT/WidgetExtension" --quiet
 }
 
 build_widget_extension() {
@@ -409,11 +502,15 @@ install_widget_extension() {
 }
 
 install_binary "CodexBar" "$APP/Contents/MacOS/CodexBar"
+strip_release_binary "$APP/Contents/MacOS/CodexBar"
 # Ship CodexBarCLI alongside the app for easy symlinking.
 install_binary "CodexBarCLI" "$APP/Contents/Helpers/CodexBarCLI"
+strip_release_binary "$APP/Contents/Helpers/CodexBarCLI"
 # Watchdog helper: ensures `claude` probes die when CodexBar crashes/gets killed.
 install_binary "CodexBarClaudeWatchdog" "$APP/Contents/Helpers/CodexBarClaudeWatchdog"
+strip_release_binary "$APP/Contents/Helpers/CodexBarClaudeWatchdog"
 install_widget_extension
+strip_release_binary "$APP/Contents/PlugIns/CodexBarWidget.appex/Contents/MacOS/CodexBarWidget"
 
 swiftpm_bin_path "${ARCH_LIST[0]}" PREFERRED_BUILD_DIR
 
@@ -427,7 +524,7 @@ chmod -R a+rX "$APP/Contents/Frameworks/Sparkle.framework"
 xattr -cr "$APP/Contents/Frameworks/Sparkle.framework"
 find "$APP/Contents/Frameworks/Sparkle.framework" -name '._*' -delete
 install_name_tool -add_rpath "@executable_path/../Frameworks" "$APP/Contents/MacOS/CodexBar"
-# Re-sign Sparkle and all nested components with Developer ID + timestamp
+# Re-sign Sparkle and all nested components with the selected package identity.
 SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
 if [[ "$SIGNING_MODE" == "adhoc" ]]; then
   CODESIGN_ID="-"
@@ -476,6 +573,17 @@ if [[ ! -d "$APP/Contents/Resources/KeyboardShortcuts_KeyboardShortcuts.bundle" 
   exit 1
 fi
 
+# The helper CLI resolves CodexBarCore resources beside its executable. Keep a
+# dedicated copy in Helpers; the app copy above remains in Contents/Resources.
+CORE_RESOURCE_BUNDLE="${PREFERRED_BUILD_DIR}/CodexBar_CodexBarCore.bundle"
+if [[ ! -d "$CORE_RESOURCE_BUNDLE" ]]; then
+  echo "ERROR: Missing CodexBarCore SwiftPM resource bundle for CodexBarCLI." >&2
+  echo "Expected: ${CORE_RESOURCE_BUNDLE}" >&2
+  exit 1
+fi
+rm -rf "$APP/Contents/Helpers/CodexBar_CodexBarCore.bundle"
+cp -R "$CORE_RESOURCE_BUNDLE" "$APP/Contents/Helpers/"
+
 # Ensure contents are writable before stripping attributes and signing.
 chmod -R u+w "$APP"
 
@@ -486,6 +594,9 @@ find "$APP" -name '._*' -delete
 # Sign helper binaries if present
 if [[ -f "${APP}/Contents/Helpers/CodexBarCLI" ]]; then
   codesign "${CODESIGN_ARGS[@]}" "${APP}/Contents/Helpers/CodexBarCLI"
+fi
+if [[ -d "${APP}/Contents/Helpers/CodexBar_CodexBarCore.bundle" ]]; then
+  codesign "${CODESIGN_ARGS[@]}" "${APP}/Contents/Helpers/CodexBar_CodexBarCore.bundle"
 fi
 if [[ -f "${APP}/Contents/Helpers/CodexBarClaudeWatchdog" ]]; then
   codesign "${CODESIGN_ARGS[@]}" "${APP}/Contents/Helpers/CodexBarClaudeWatchdog"
@@ -501,6 +612,12 @@ if [[ -d "${APP}/Contents/PlugIns/CodexBarWidget.appex" ]]; then
     "$APP/Contents/PlugIns/CodexBarWidget.appex"
 fi
 
+# Embed the Developer ID provisioning profile (authorizes the iCloud entitlements;
+# Gatekeeper re-validates it at every launch, so it must be sealed into the signature).
+if [[ "$EMBED_PROVISIONING_PROFILE" == "1" ]]; then
+  cp "$PROVISIONING_PROFILE_SOURCE" "$APP/Contents/embedded.provisionprofile"
+fi
+
 # Finally sign the app bundle itself
 codesign "${CODESIGN_ARGS[@]}" \
   --entitlements "$APP_ENTITLEMENTS" \
@@ -509,4 +626,11 @@ codesign "${CODESIGN_ARGS[@]}" \
 rm -rf "$APP_FINAL"
 mv "$APP" "$APP_FINAL"
 APP="$APP_FINAL"
+verify_packaged_app_integrity "$APP"
+# Release gate for the 0.48.0 crash class (#2738): launch the packaged binary
+# with the build checkout unreadable so a `Bundle.module`-style compile-time
+# path dependency fails packaging here instead of on user machines.
+if [[ "$LOWER_CONF" == "release" ]]; then
+  "$ROOT/Scripts/verify_packaged_app_launch.sh" "$APP"
+fi
 echo "Created $APP"

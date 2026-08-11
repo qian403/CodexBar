@@ -30,6 +30,15 @@ export LITELLM_BASE_URL=https://litellm.example.com
 
 `LITELLM_BASE_URL` may include `/v1`; CodexBar strips that suffix before calling LiteLLM management endpoints.
 
+The base URL must use HTTPS unless it names a loopback or private-network address, or a `.local` mDNS host,
+and must not embed credentials because the API key is sent to it as a bearer token. Plain HTTP remains
+available for self-hosted proxies on loopback, RFC 1918, link-local, and IPv6 unique-local networks. A base
+URL that does not meet these rules is rejected, and the provider reports that `LITELLM_BASE_URL` is invalid
+instead of fetching.
+
+The native fetcher remains authoritative. Configured plugin origins cover HTTPS and loopback HTTP, but do not cover
+the existing private-network and `.local` HTTP contract without a broader host network policy.
+
 ## Data Source
 
 The provider calls:
@@ -40,9 +49,13 @@ The provider calls:
 
 All requests use `Authorization: Bearer <apiKey>`. CodexBar does not request or store a LiteLLM master key.
 
-Personal usage is shown as the primary window. If the authenticated key has a team, its exact matching team budget is
-shown as the secondary window and becomes the automatic menu bar metric because that budget is enforced for the key.
-Spend remains visible as an API-spend row when LiteLLM does not configure a budget.
+For user-bound keys, personal usage is shown as the primary window. If the key has a team, its exact matching team
+budget is shown as the secondary window and becomes the automatic menu bar metric because that budget is enforced for
+the key. Team-only keys show that team budget as their sole usage window. Spend remains visible as an API-spend row
+when LiteLLM does not configure a budget.
+
+The virtual key must be allowed to read its own `/key/info` data and the corresponding user or team information
+endpoint. CodexBar validates returned user and team IDs against `/key/info` before displaying usage.
 
 ## Security
 

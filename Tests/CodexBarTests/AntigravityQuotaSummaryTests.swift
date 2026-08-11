@@ -37,14 +37,23 @@ struct AntigravityQuotaSummaryTests {
             "antigravity-quota-summary-3p-weekly",
         ])
         #expect(windows.map(\.title) == [
-            "Gemini Session",
-            "Gemini Weekly",
-            "Claude + GPT Session",
-            "Claude + GPT Weekly",
+            "Gemini 5-hour",
+            "Gemini weekly",
+            "Claude/GPT 5-hour",
+            "Claude/GPT weekly",
         ])
         #expect(windows.map(\.window.windowMinutes) == [300, 10080, 300, 10080])
         #expect(windows.map { $0.window.remainingPercent.rounded() } == [91, 82, 73, 64])
         #expect(windows.map(\.usageKnown) == [true, true, true, true])
+
+        let expectedDates = [
+            ISO8601DateFormatter().date(from: "2026-06-15T11:39:34Z"),
+            ISO8601DateFormatter().date(from: "2026-06-19T08:45:39Z"),
+            ISO8601DateFormatter().date(from: "2026-06-15T12:52:10Z"),
+            ISO8601DateFormatter().date(from: "2026-06-20T00:39:54Z"),
+        ]
+        #expect(windows.map(\.window.resetsAt) == expectedDates)
+
         #expect(usage.primary?.remainingPercent.rounded() == 82)
         #expect(usage.secondary?.remainingPercent.rounded() == 64)
         #expect(usage.tertiary == nil)
@@ -73,6 +82,115 @@ struct AntigravityQuotaSummaryTests {
         let usage = try snapshot.toUsageSnapshot()
 
         #expect(usage.extraRateWindows?.first?.window.remainingPercent == 50)
+    }
+
+    @Test(arguments: ["session", "5h", "5-hour", "five hour", "five-hour"])
+    func `normalizes supported session cadence aliases without rewriting bucket IDs`(alias: String) throws {
+        let bucketID = "gemini-\(alias)"
+        let json = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "buckets": [
+                {
+                  "bucketId": "\(bucketID)",
+                  "displayName": "\(alias)",
+                  "remaining": { "remainingFraction": 0.75 }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let snapshot = try AntigravityStatusProbe.parseQuotaSummaryResponse(Data(json.utf8))
+        let window = try #require(snapshot.toUsageSnapshot().extraRateWindows?.first)
+
+        #expect(window.id == "antigravity-quota-summary-\(bucketID)")
+        #expect(window.title == "Gemini 5-hour")
+        #expect(window.window.windowMinutes == 300)
+        #expect(window.window.remainingPercent == 75)
+    }
+
+    @Test
+    func `recognizes underscore cadence without rewriting bucket ID`() throws {
+        let json = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "buckets": [
+                {
+                  "bucketId": "gemini_session",
+                  "displayName": "Gemini",
+                  "remaining": { "remainingFraction": 0.75 }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let snapshot = try AntigravityStatusProbe.parseQuotaSummaryResponse(Data(json.utf8))
+        let window = try #require(snapshot.toUsageSnapshot().extraRateWindows?.first)
+
+        #expect(window.id == "antigravity-quota-summary-gemini_session")
+        #expect(window.title == "Gemini 5-hour")
+        #expect(window.window.windowMinutes == 300)
+    }
+
+    @Test
+    func `recognizes prefixed cadence before limit suffix`() throws {
+        let json = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "buckets": [
+                {
+                  "bucketId": "gemini-5h limit",
+                  "displayName": "Gemini quota",
+                  "remaining": { "remainingFraction": 0.75 }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let snapshot = try AntigravityStatusProbe.parseQuotaSummaryResponse(Data(json.utf8))
+        let window = try #require(snapshot.toUsageSnapshot().extraRateWindows?.first)
+
+        #expect(window.id == "antigravity-quota-summary-gemini-5h limit")
+        #expect(window.title == "Gemini 5-hour")
+        #expect(window.window.windowMinutes == 300)
+    }
+
+    @Test
+    func `does not classify cadence aliases embedded inside unrelated words`() throws {
+        let json = """
+        {
+          "groups": [
+            {
+              "displayName": "Gemini Models",
+              "buckets": [
+                {
+                  "bucketId": "gemini-session-history",
+                  "displayName": "Session History",
+                  "remaining": { "remainingFraction": 0.75 }
+                }
+              ]
+            }
+          ]
+        }
+        """
+
+        let snapshot = try AntigravityStatusProbe.parseQuotaSummaryResponse(Data(json.utf8))
+        let window = try #require(snapshot.toUsageSnapshot().extraRateWindows?.first)
+
+        #expect(window.title == "Gemini Session History")
+        #expect(window.window.windowMinutes == nil)
     }
 
     @Test
@@ -267,13 +385,15 @@ private func antigravityQuotaSummaryJSON() -> String {
                 "bucketId": "gemini-weekly",
                 "displayName": "Weekly Limit",
                 "remaining": { "remainingFraction": 0.82 },
-                "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 11 hours."
+                "description": "You have used some of your weekly limit, it will fully refresh in 5 days, 11 hours.",
+                "resetTime": "2026-06-19T08:45:39Z"
               },
               {
                 "bucketId": "gemini-5h",
                 "displayName": "Five Hour Limit",
                 "remaining": { "remainingFraction": 0.91 },
-                "description": "You have used some of your 5-hour limit, it will fully refresh in 4 hours."
+                "description": "You have used some of your 5-hour limit, it will fully refresh in 4 hours.",
+                "resetTime": "2026-06-15T11:39:34Z"
               }
             ]
           },
@@ -285,13 +405,15 @@ private func antigravityQuotaSummaryJSON() -> String {
                 "bucketId": "3p-weekly",
                 "displayName": "Weekly Limit",
                 "remaining": { "remainingFraction": 0.64 },
-                "description": "You have used some of your weekly limit, it will fully refresh in 6 days, 22 hours."
+                "description": "You have used some of your weekly limit, it will fully refresh in 6 days, 22 hours.",
+                "resetTime": "2026-06-20T00:39:54Z"
               },
               {
                 "bucketId": "3p-5h",
                 "displayName": "Five Hour Limit",
                 "remaining": { "remainingFraction": 0.73 },
-                "description": "You have used some of your 5-hour limit, it will fully refresh in 3 hours, 38 minutes."
+                "description": "You have used some of your 5-hour limit, it will fully refresh in 3 hours, 38 minutes.",
+                "resetTime": "2026-06-15T12:52:10Z"
               }
             ]
           }

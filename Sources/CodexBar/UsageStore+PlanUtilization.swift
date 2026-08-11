@@ -2,22 +2,32 @@ import CodexBarCore
 import Foundation
 
 extension UsageStore {
-    private nonisolated static let weeklyLimitResetThreshold = 1.0
+    nonisolated static let sessionLimitResetDetectorDefaultsKey = "sessionLimitResetDetectorStates"
     private nonisolated static let weeklyLimitResetDetectorDefaultsKey = "weeklyLimitResetDetectorStates"
-    private nonisolated static let weeklyWindowMinutes = 7 * 24 * 60
-
-    struct WeeklyLimitResetDetectorState: Codable, Equatable {
-        let wasAboveThreshold: Bool
-        let lastObservedAt: Date
-    }
+    private nonisolated static let claudeOAuthAccountUuidMapDefaultsKey = "ClaudeOAuthHistoryOwnerAccountUuidMapV2"
+    private nonisolated static let claudeOAuthAccountUuidMapLegacyDefaultsKey =
+        "ClaudeOAuthHistoryOwnerAccountUuidMapV1"
+    private nonisolated static let claudeOAuthAccountCandidateMapDefaultsKey =
+        "ClaudeOAuthHistoryOwnerAccountCandidateMapV1"
+    nonisolated static let sessionWindowMinutes = 5 * 60
+    nonisolated static let weeklyWindowMinutes = 7 * 24 * 60
+    nonisolated static let planUtilizationUnscopedPreferredKey = "__unscoped__"
+    private nonisolated static let claudeOAuthPlanUtilizationAccountKeyPrefix = "__claude_oauth__:"
 
     func supportsPlanUtilizationHistory(for provider: UsageProvider) -> Bool {
-        switch provider {
-        case .codex, .claude:
-            true
-        default:
-            false
+        if ProviderDescriptorRegistry.descriptor(for: provider).history.alwaysTracksPlanUtilization {
+            return true
         }
+        if self.planUtilizationHistory[provider.instanceID]?.isEmpty == false {
+            return true
+        }
+        guard self.settings.historicalTrackingEnabled, let snapshot = self.snapshots[provider.instanceID] else {
+            return false
+        }
+        return !self.planUtilizationSeriesSamples(
+            provider: provider,
+            snapshot: snapshot,
+            capturedAt: snapshot.updatedAt).isEmpty
     }
 
     private nonisolated static let planUtilizationMinSampleIntervalSeconds: TimeInterval = 60 * 60
@@ -29,7 +39,7 @@ extension UsageStore {
         let windowMinutes: Int
     }
 
-    private struct PlanUtilizationSeriesSample {
+    struct PlanUtilizationSeriesSample {
         let name: PlanUtilizationSeriesName
         let windowMinutes: Int
         let entry: PlanUtilizationHistoryEntry
@@ -40,36 +50,120 @@ extension UsageStore {
     }
 
     func planUtilizationHistorySelection(for provider: UsageProvider)
-        -> (accountKey: String?, histories: [PlanUtilizationSeriesHistory])
+        -> PlanUtilizationHistorySelection
     {
-        var providerBuckets = self.planUtilizationHistory[provider] ?? PlanUtilizationHistoryBuckets()
+        // The persisted history has not been read yet. Return the in-memory
+        // stub (empty) without performing account migration or enqueueing an
+        // empty persistence snapshot — otherwise a startup refresh racing the
+        // background load would record samples against an empty bucket and
+        // overwrite real disk history.
+        if !self.planUtilizationHistoryLoaded {
+            let providerBuckets = self.planUtilizationHistory[provider.instanceID] ?? PlanUtilizationHistoryBuckets()
+            return PlanUtilizationHistorySelection(accountKey: nil, histories: providerBuckets.histories(for: nil))
+        }
+        var providerBuckets = self.planUtilizationHistory[provider.instanceID] ?? PlanUtilizationHistoryBuckets()
+        // Provider-specific by design: Claude OAuth provenance can outrank configured token-account selection.
+        if provider == .claude,
+           providerBuckets.preferredAccountKey == Self.planUtilizationUnscopedPreferredKey
+           || Self.isClaudeOAuthPlanUtilizationAccountKey(providerBuckets.preferredAccountKey)
+        {
+            // Persisted OAuth provenance outranks an unrelated configured token account. The unscoped
+            // sentinel intentionally resolves to nil, including after the history store is reloaded.
+            let accountKey = self.stickyPlanUtilizationAccountKey(providerBuckets: providerBuckets)
+            return PlanUtilizationHistorySelection(
+                accountKey: accountKey,
+                histories: providerBuckets.histories(for: accountKey))
+        }
         let originalProviderBuckets = providerBuckets
         let accountKey = self.resolvePlanUtilizationAccountKey(
             provider: provider,
-            snapshot: self.snapshots[provider],
+            snapshot: self.snapshots[provider.instanceID],
             preferredAccount: nil,
             providerBuckets: &providerBuckets)
-        self.planUtilizationHistory[provider] = providerBuckets
+        self.planUtilizationHistory[provider.instanceID] = providerBuckets
         if providerBuckets != originalProviderBuckets {
+            self.planUtilizationHistoryRevision &+= 1
+            self.sessionEquivalentBurnCache.removeValue(forKey: provider.instanceID)
             let snapshotToPersist = self.planUtilizationHistory
             Task {
                 await self.planUtilizationPersistenceCoordinator.enqueue(snapshotToPersist)
             }
         }
-        return (accountKey, providerBuckets.histories(for: accountKey))
+        return PlanUtilizationHistorySelection(
+            accountKey: accountKey,
+            histories: providerBuckets.histories(for: accountKey))
+    }
+
+    func planUtilizationHistorySelection(
+        for provider: UsageProvider,
+        account: ProviderTokenAccount) -> PlanUtilizationHistorySelection
+    {
+        guard self.planUtilizationHistoryLoaded,
+              let accountKey = Self.planUtilizationAccountKey(provider: provider, account: account)
+        else {
+            return .unavailable
+        }
+        if self.settings.effectiveSelectedTokenAccount(for: provider)?.id == account.id {
+            let currentSelection = self.planUtilizationHistorySelection(for: provider)
+            if currentSelection.accountKey == accountKey {
+                return currentSelection
+            }
+        }
+        let providerBuckets = self.planUtilizationHistory[provider.instanceID] ?? PlanUtilizationHistoryBuckets()
+        return PlanUtilizationHistorySelection(
+            accountKey: accountKey,
+            histories: providerBuckets.histories(for: accountKey))
+    }
+
+    func planUtilizationHistorySelection(
+        for provider: UsageProvider,
+        snapshotOverride snapshot: UsageSnapshot) -> PlanUtilizationHistorySelection
+    {
+        guard self.planUtilizationHistoryLoaded,
+              let accountKey = Self.planUtilizationIdentityAccountKey(provider: provider, snapshot: snapshot)
+        else {
+            return .unavailable
+        }
+        if self.settings.effectiveSelectedTokenAccount(for: provider) == nil,
+           let currentSnapshot = self.snapshots[provider.instanceID],
+           Self.planUtilizationIdentityAccountKey(provider: provider, snapshot: currentSnapshot) == accountKey
+        {
+            let currentSelection = self.planUtilizationHistorySelection(for: provider)
+            if currentSelection.accountKey == accountKey {
+                return currentSelection
+            }
+        }
+        let providerBuckets = self.planUtilizationHistory[provider.instanceID] ?? PlanUtilizationHistoryBuckets()
+        return PlanUtilizationHistorySelection(
+            accountKey: accountKey,
+            histories: providerBuckets.histories(for: accountKey))
     }
 
     func codexPlanUtilizationHistories(forVisibleAccount account: CodexVisibleAccount)
         -> [PlanUtilizationSeriesHistory]
     {
+        self.codexPlanUtilizationHistorySelection(forVisibleAccount: account).histories
+    }
+
+    func codexPlanUtilizationHistorySelection(forVisibleAccount account: CodexVisibleAccount)
+        -> PlanUtilizationHistorySelection
+    {
+        // Same gate as `planUtilizationHistorySelection`: defer ownership
+        // migration until the persisted history has been read. Unlike the live
+        // selection, an explicit account must never borrow unscoped startup data.
+        if !self.planUtilizationHistoryLoaded {
+            return .unavailable
+        }
         var providerBuckets = self.planUtilizationHistory[.codex] ?? PlanUtilizationHistoryBuckets()
         let originalProviderBuckets = providerBuckets
         let ownership = self.codexOwnershipContext(forVisibleAccount: account)
-        guard let canonicalKey = ownership.canonicalKey else { return [] }
+        guard let canonicalKey = ownership.canonicalKey else { return .unavailable }
 
         if ownership.hasAdjacentEmailScopeAmbiguity {
-            guard canonicalKey != ownership.canonicalEmailHashKey else { return [] }
-            return providerBuckets.histories(for: canonicalKey)
+            guard canonicalKey != ownership.canonicalEmailHashKey else { return .unavailable }
+            return PlanUtilizationHistorySelection(
+                accountKey: canonicalKey,
+                histories: providerBuckets.histories(for: canonicalKey))
         }
 
         let accountKey = self.materializeCodexPlanUtilizationHistoryIfNeeded(
@@ -79,24 +173,26 @@ extension UsageStore {
             providerBuckets: &providerBuckets)
         self.planUtilizationHistory[.codex] = providerBuckets
         if providerBuckets != originalProviderBuckets {
+            self.planUtilizationHistoryRevision &+= 1
+            self.sessionEquivalentBurnCache.removeValue(forKey: .codex)
             let snapshotToPersist = self.planUtilizationHistory
             Task {
                 await self.planUtilizationPersistenceCoordinator.enqueue(snapshotToPersist)
             }
         }
-        return providerBuckets.histories(for: accountKey)
+        return PlanUtilizationHistorySelection(
+            accountKey: accountKey,
+            histories: providerBuckets.histories(for: accountKey))
     }
 
     func shouldShowRefreshingMenuCard(for provider: UsageProvider) -> Bool {
-        let isRefreshing = self.isRefreshing || self.refreshingProviders.contains(provider)
-        return isRefreshing
-            && self.snapshots[provider] == nil
+        self.refreshingProviders.contains(provider.instanceID)
+            && self.snapshots[provider.instanceID] == nil
             && self.error(for: provider) == nil
     }
 
     func shouldShowRefreshingMenuCardIndicator(for provider: UsageProvider) -> Bool {
-        let isRefreshing = self.isRefreshing || self.refreshingProviders.contains(provider)
-        return isRefreshing && self.error(for: provider) == nil
+        self.refreshingProviders.contains(provider.instanceID) && self.error(for: provider) == nil
     }
 
     func shouldHidePlanUtilizationMenuItem(for provider: UsageProvider) -> Bool {
@@ -108,58 +204,142 @@ extension UsageStore {
         provider: UsageProvider,
         snapshot: UsageSnapshot,
         account: ProviderTokenAccount? = nil,
+        claudeOAuthPersistentRefHash: String? = nil,
+        claudeOAuthHistoryOwnerIdentifier: String? = nil,
+        claudeOAuthKeychainCredentialMismatch: Bool = false,
+        claudeOAuthKeychainCredentialAbsent: Bool = false,
+        claudeOAuthKeychainCredentialUnavailable: Bool = false,
+        claudeOAuthActiveAccountObservation: ClaudeOAuthActiveAccountObservation = .stable(identity: nil),
+        isClaudeOAuthSample: Bool = false,
         shouldUpdatePreferredAccountKey: Bool = true,
         shouldAdoptUnscopedHistory: Bool = true,
+        codexLimitResetOwnerKey: CodexLimitResetOwnerKey? = nil,
         now: Date = Date())
         async
     {
-        let samples = self.planUtilizationSeriesSamples(provider: provider, snapshot: snapshot, capturedAt: now)
-        guard !samples.isEmpty else { return }
-
-        let detectorAccountKey = self.planUtilizationAccountKey(
-            for: provider,
+        let detectorSamples = self.planUtilizationSeriesSamples(
+            provider: provider,
             snapshot: snapshot,
-            preferredAccount: account)
-        await MainActor.run {
-            self.postWeeklyLimitResetCelebrationIfNeeded(
+            capturedAt: now)
+        let samples = provider == .antigravity
+            ? self.planUtilizationSeriesSamples(
                 provider: provider,
-                account: account,
                 snapshot: snapshot,
-                accountKey: detectorAccountKey,
-                samples: samples)
+                capturedAt: now,
+                forSessionEquivalents: true)
+            : detectorSamples
+        var effectiveOwner = claudeOAuthHistoryOwnerIdentifier
+        if provider == .claude, isClaudeOAuthSample, let owner = claudeOAuthHistoryOwnerIdentifier {
+            effectiveOwner = self.resolvedClaudeOAuthHistoryOwner(evidence: ClaudeOAuthHistoryEvidence(
+                owner: owner,
+                persistentRefHash: claudeOAuthPersistentRefHash,
+                keychainCredentialMismatch: claudeOAuthKeychainCredentialMismatch,
+                keychainCredentialAbsent: claudeOAuthKeychainCredentialAbsent,
+                keychainCredentialUnavailable: claudeOAuthKeychainCredentialUnavailable,
+                activeAccountObservation: claudeOAuthActiveAccountObservation,
+                observedAt: now))
+        }
+        let detectorAccountKey = if provider == .claude, isClaudeOAuthSample {
+            Self.claudeOAuthPlanUtilizationAccountKey(
+                historyOwnerIdentifier: effectiveOwner,
+                corroboratingPersistentRefHash: claudeOAuthPersistentRefHash)
+        } else {
+            self.planUtilizationAccountKey(
+                for: provider,
+                snapshot: snapshot,
+                preferredAccount: account)
+        }
+        if provider == .claude, isClaudeOAuthSample, detectorAccountKey == nil {
+            // Persisting without a high-entropy owner would merge unrelated OAuth accounts into `unscoped`.
+            return
+        }
+        let detectorContext = LimitResetDetectionContext(
+            provider: provider,
+            account: account,
+            snapshot: snapshot,
+            accountKey: detectorAccountKey,
+            capturedAt: now,
+            codexLimitResetOwnerKey: codexLimitResetOwnerKey)
+        await MainActor.run {
+            self.postLimitResetCelebrationsIfNeeded(
+                context: detectorContext,
+                samples: detectorSamples)
         }
 
-        guard self.supportsPlanUtilizationHistory(for: provider) else { return }
+        guard !samples.isEmpty else { return }
+        guard self.shouldRecordPlanUtilizationHistory(for: provider) else { return }
         guard !self.shouldDeferClaudePlanUtilizationHistory(provider: provider) else { return }
 
-        var snapshotToPersist: [UsageProvider: PlanUtilizationHistoryBuckets]?
+        // Wait for the persisted history to finish loading before mutating
+        // `self.planUtilizationHistory`. A startup refresh racing the
+        // background decode would otherwise record samples against an empty
+        // bucket and overwrite real disk history on the next persistence
+        // enqueue.
+        if !self.planUtilizationHistoryLoaded {
+            // `_cancelPlanUtilizationHistoryLoadForTesting` cancels the task
+            // and flips `loaded` to true; this branch only runs when the load
+            // is still pending. Cancellation here (deinit during a startup
+            // refresh) means the in-memory dictionary is empty — proceeding
+            // is the safer choice than discarding the sample.
+            _ = await self.planUtilizationHistoryLoadTask?.result
+        }
+
+        var snapshotToPersist: [ProviderInstanceID: PlanUtilizationHistoryBuckets]?
         await MainActor.run {
-            var providerBuckets = self.planUtilizationHistory[provider] ?? PlanUtilizationHistoryBuckets()
-            let preferredAccount = account ?? self.settings.selectedTokenAccount(for: provider)
+            var providerBuckets = self.planUtilizationHistory[provider.instanceID] ?? PlanUtilizationHistoryBuckets()
+            let originalProviderBuckets = providerBuckets
+            let preferredAccount = account ?? self.settings.effectiveSelectedTokenAccount(for: provider)
             let accountKey = self.resolvePlanUtilizationAccountKey(
                 provider: provider,
                 snapshot: snapshot,
                 preferredAccount: preferredAccount,
+                claudeOAuthPersistentRefHash: claudeOAuthPersistentRefHash,
+                claudeOAuthHistoryOwnerIdentifier: effectiveOwner,
+                isClaudeOAuthSample: isClaudeOAuthSample,
                 shouldUpdatePreferredAccountKey: shouldUpdatePreferredAccountKey,
                 shouldAdoptUnscopedHistory: shouldAdoptUnscopedHistory,
                 providerBuckets: &providerBuckets)
-            let histories = providerBuckets.histories(for: accountKey)
-
-            guard let updatedHistories = Self.updatedPlanUtilizationHistories(
-                existingHistories: histories,
-                samples: samples)
-            else {
-                return
+            var histories = providerBuckets.histories(for: accountKey)
+            let originalHistories = histories
+            var samplesToPersist = samples
+            if provider == .antigravity,
+               samples.contains(where: { $0.name == .session }),
+               !histories.contains(where: { $0.name == .session })
+            {
+                // Pre-feature Antigravity history could contain a provider-wide weekly maximum.
+                // Drop it before starting the Gemini-pinned session/weekly pair.
+                histories.removeAll { $0.name == .weekly }
+            }
+            if ![UsageProvider.codex, .claude, .antigravity].contains(provider) {
+                self.reconcileGenericSessionEquivalentHistory(
+                    scope: (provider, accountKey),
+                    snapshot: snapshot,
+                    providerBuckets: &providerBuckets,
+                    histories: &histories,
+                    samples: &samplesToPersist)
+                self.sessionEquivalentBurnCache.removeValue(forKey: provider.instanceID)
             }
 
-            providerBuckets.setHistories(updatedHistories, for: accountKey)
-            self.planUtilizationHistory[provider] = providerBuckets
+            let updatedHistories = Self.updatedPlanUtilizationHistories(
+                existingHistories: histories,
+                samples: samplesToPersist) ?? histories
+            if updatedHistories != originalHistories {
+                providerBuckets.setHistories(updatedHistories, for: accountKey)
+            }
+
+            guard providerBuckets != originalProviderBuckets else { return }
+            self.planUtilizationHistory[provider.instanceID] = providerBuckets
             self.planUtilizationHistoryRevision &+= 1
             snapshotToPersist = self.planUtilizationHistory
         }
 
         guard let snapshotToPersist else { return }
         await self.planUtilizationPersistenceCoordinator.enqueue(snapshotToPersist)
+    }
+
+    private func shouldRecordPlanUtilizationHistory(for provider: UsageProvider) -> Bool {
+        ProviderDescriptorRegistry.descriptor(for: provider).history.alwaysTracksPlanUtilization ||
+            self.settings.historicalTrackingEnabled
     }
 
     private nonisolated static func updatedPlanUtilizationHistories(
@@ -278,6 +458,7 @@ extension UsageStore {
     nonisolated static var _planUtilizationMaxSamplesForTesting: Int {
         self.planUtilizationMaxSamples
     }
+
     #endif
 
     private nonisolated static func clampedPercent(_ value: Double?) -> Double? {
@@ -285,72 +466,81 @@ extension UsageStore {
         return max(0, min(100, value))
     }
 
-    private func postWeeklyLimitResetCelebrationIfNeeded(
-        provider: UsageProvider,
-        account: ProviderTokenAccount?,
-        snapshot: UsageSnapshot,
-        accountKey: String?,
+    private func postLimitResetCelebrationsIfNeeded(
+        context: LimitResetDetectionContext,
         samples: [PlanUtilizationSeriesSample])
     {
-        guard let weeklySample = samples.last(where: { $0.name == .weekly }) else { return }
-
-        let accountIdentifier = self.weeklyLimitResetAccountIdentifier(
-            provider: provider,
-            account: account,
-            snapshot: snapshot,
-            accountKey: accountKey)
-        let detectorKey = Self.weeklyLimitResetDetectorStateKey(
-            provider: provider,
-            accountIdentifier: accountIdentifier)
-        let currentUsed = weeklySample.entry.usedPercent
-        let currentObservedAt = weeklySample.entry.capturedAt
-        let wasAboveThreshold = currentUsed > Self.weeklyLimitResetThreshold
-        if let existingState = self.weeklyLimitResetDetectorStates[detectorKey],
-           currentObservedAt <= existingState.lastObservedAt
-        {
-            return
+        // Provider-specific by design: Codex reset celebration confirmation uses owner-scoped session observations.
+        let sessionObservation: LimitResetObservation? = if context.provider == .codex {
+            samples.last(where: { $0.name == .session }).map {
+                LimitResetObservation(
+                    usedPercent: $0.entry.usedPercent,
+                    observedAt: $0.entry.capturedAt,
+                    resetBoundary: $0.entry.resetsAt,
+                    source: nil)
+            }
+        } else {
+            self.sessionQuotaWindow(provider: context.provider, snapshot: context.snapshot).flatMap { resolved in
+                guard Self.isSemanticSessionResetWindow(resolved) else { return nil }
+                return Self.clampedPercent(resolved.window.usedPercent).map {
+                    LimitResetObservation(
+                        usedPercent: $0,
+                        observedAt: context.capturedAt,
+                        resetBoundary: resolved.window.resetsAt,
+                        source: resolved.source)
+                }
+            }
         }
+        self.postLimitResetCelebrationIfNeeded(
+            states: &self.sessionLimitResetDetectorStates,
+            context: context,
+            descriptor: LimitResetDetectionDescriptor(
+                seriesName: .session,
+                defaultsKey: Self.sessionLimitResetDetectorDefaultsKey,
+                resetKind: "session"),
+            observation: sessionObservation)
+        let weeklyObservation = samples.last(where: { $0.name == .weekly }).map {
+            LimitResetObservation(
+                usedPercent: $0.entry.usedPercent,
+                observedAt: $0.entry.capturedAt,
+                resetBoundary: $0.entry.resetsAt,
+                source: nil)
+        }
+        self.postLimitResetCelebrationIfNeeded(
+            states: &self.weeklyLimitResetDetectorStates,
+            context: context,
+            descriptor: LimitResetDetectionDescriptor(
+                seriesName: .weekly,
+                defaultsKey: Self.weeklyLimitResetDetectorDefaultsKey,
+                resetKind: "weekly"),
+            observation: weeklyObservation)
+    }
 
-        let shouldPost = self.weeklyLimitResetDetectorStates[detectorKey]?.wasAboveThreshold == true
-            && !wasAboveThreshold
-        self.weeklyLimitResetDetectorStates[detectorKey] = WeeklyLimitResetDetectorState(
-            wasAboveThreshold: wasAboveThreshold,
-            lastObservedAt: currentObservedAt)
-        self.persistWeeklyLimitResetDetectorStates()
-
-        guard shouldPost else { return }
-        let accountLabel = self.weeklyLimitResetAccountLabel(
-            provider: provider,
-            account: account,
-            snapshot: snapshot)
-        let event = WeeklyLimitResetEvent(
-            provider: provider,
-            accountIdentifier: accountIdentifier,
-            accountLabel: accountLabel,
-            usedPercent: currentUsed)
-
-        CodexBarLog.logger(LogCategories.confetti).info(
-            "Weekly limit reset",
-            metadata: [
-                "provider": provider.rawValue,
-                "accountIdentifier": accountIdentifier,
-                "accountLabel": accountLabel ?? "",
-                "usedPercent": String(format: "%.2f", currentUsed),
-                "observedAt": String(format: "%.0f", currentObservedAt.timeIntervalSince1970),
-            ])
-        NotificationCenter.default.post(name: .codexbarWeeklyLimitReset, object: event)
+    private static func isSemanticSessionResetWindow(
+        _ resolved: (window: RateWindow, source: SessionQuotaWindowSource)) -> Bool
+    {
+        guard !resolved.window.isSyntheticPlaceholder else { return false }
+        switch resolved.source {
+        case .primary:
+            guard let minutes = resolved.window.windowMinutes else { return false }
+            return minutes > 0 && minutes <= 6 * 60
+        case .copilotSecondaryFallback, .antigravityQuotaSummary, .antigravityLegacy:
+            return true
+        }
     }
 
     private func planUtilizationSeriesSamples(
         provider: UsageProvider,
         snapshot: UsageSnapshot,
-        capturedAt: Date) -> [PlanUtilizationSeriesSample]
+        capturedAt: Date,
+        forSessionEquivalents: Bool = false) -> [PlanUtilizationSeriesSample]
     {
         var samplesByKey: [PlanUtilizationSeriesKey: PlanUtilizationSeriesSample] = [:]
 
         func appendWindow(_ window: RateWindow?, name: PlanUtilizationSeriesName?) {
             guard let name,
                   let window,
+                  !window.isSyntheticPlaceholder,
                   let windowMinutes = window.windowMinutes,
                   windowMinutes > 0,
                   let usedPercent = Self.clampedPercent(window.usedPercent)
@@ -369,6 +559,19 @@ extension UsageStore {
                     resetsAt: window.resetsAt))
         }
 
+        func appendGenericSessionEquivalentWindows() {
+            let components = Self.genericSessionEquivalentWindowComponents(snapshot: snapshot)
+            switch Self.genericSessionEquivalentWindowPairResolution(snapshot: snapshot) {
+            case let .resolved(session, weekly, _, _):
+                appendWindow(session, name: .session)
+                appendWindow(weekly, name: .weekly)
+            case .incomplete, .ambiguous:
+                appendWindow(components.session?.window, name: .session)
+                appendWindow(components.weekly?.window, name: .weekly)
+            }
+        }
+
+        // Provider-specific by design: payload shapes project different semantic lanes into history series.
         switch provider {
         case .codex:
             let projection = self.codexConsumerProjection(
@@ -382,27 +585,41 @@ extension UsageStore {
             appendWindow(snapshot.primary, name: .session)
             appendWindow(snapshot.secondary, name: .weekly)
             appendWindow(snapshot.tertiary, name: .opus)
-        case .antigravity:
-            let namedWeeklyWindows = snapshot.extraRateWindows?
-                .filter {
-                    $0.usageKnown
-                        && $0.id.hasPrefix("antigravity-quota-summary-")
-                        && $0.window.windowMinutes == Self.weeklyWindowMinutes
-                }
-                .map(\.window) ?? []
-            if let mostUsedWeeklyWindow = namedWeeklyWindows.max(by: { $0.usedPercent < $1.usedPercent }) {
-                appendWindow(mostUsedWeeklyWindow, name: .weekly)
+        case .opencodego:
+            appendWindow(snapshot.primary, name: .session)
+            appendWindow(snapshot.secondary, name: .weekly)
+            appendWindow(snapshot.tertiary, name: .monthly)
+        case .mimo, .stepfun:
+            if snapshot.primary?.windowMinutes == ProviderPaceCapability.monthlyWindowSentinelMinutes {
+                appendWindow(snapshot.primary, name: .monthly)
             } else {
-                for window in [snapshot.primary, snapshot.secondary, snapshot.tertiary] {
-                    guard let window, window.windowMinutes == Self.weeklyWindowMinutes else { continue }
-                    appendWindow(window, name: .weekly)
+                appendGenericSessionEquivalentWindows()
+            }
+        case .antigravity:
+            if forSessionEquivalents {
+                guard let windows = self.sessionEquivalentWindows(provider: provider, snapshot: snapshot) else {
+                    return []
+                }
+                appendWindow(windows.session, name: .session)
+                appendWindow(windows.weekly, name: .weekly)
+            } else {
+                let namedWeeklyWindows = snapshot.extraRateWindows?
+                    .filter {
+                        $0.usageKnown
+                            && $0.id.hasPrefix("antigravity-quota-summary-")
+                            && $0.window.windowMinutes == Self.weeklyWindowMinutes
+                    }
+                    .map(\.window) ?? []
+                if let mostUsedWeeklyWindow = namedWeeklyWindows.max(by: { $0.usedPercent < $1.usedPercent }) {
+                    appendWindow(mostUsedWeeklyWindow, name: .weekly)
+                } else {
+                    appendWindow(
+                        self.planUtilizationWeeklyWindow(provider: provider, snapshot: snapshot),
+                        name: .weekly)
                 }
             }
         default:
-            for window in [snapshot.primary, snapshot.secondary, snapshot.tertiary] {
-                guard let window, window.windowMinutes == Self.weeklyWindowMinutes else { continue }
-                appendWindow(window, name: .weekly)
-            }
+            appendGenericSessionEquivalentWindows()
         }
 
         return samplesByKey.values.sorted { lhs, rhs in
@@ -542,12 +759,12 @@ extension UsageStore {
         snapshot: UsageSnapshot? = nil,
         preferredAccount: ProviderTokenAccount? = nil) -> String?
     {
-        let account = preferredAccount ?? self.settings.selectedTokenAccount(for: provider)
+        let account = preferredAccount ?? self.settings.effectiveSelectedTokenAccount(for: provider)
         let accountKey = Self.planUtilizationAccountKey(provider: provider, account: account)
         if let accountKey {
             return accountKey
         }
-        let resolvedSnapshot = snapshot ?? self.snapshots[provider]
+        let resolvedSnapshot = snapshot ?? self.snapshots[provider.instanceID]
         return resolvedSnapshot.flatMap { Self.planUtilizationIdentityAccountKey(provider: provider, snapshot: $0) }
     }
 
@@ -559,16 +776,40 @@ extension UsageStore {
         return self.sha256Hex("\(provider.rawValue):token-account:\(account.id.uuidString.lowercased())")
     }
 
+    /// The Keychain row reference is corroborating provenance, not principal identity. Excluding it from the
+    /// canonical key keeps one credential stable when its row is recreated, while requiring the credential
+    /// discriminator ensures an in-place login replacement cannot inherit the prior principal's history.
+    private nonisolated static func claudeOAuthPlanUtilizationAccountKey(
+        historyOwnerIdentifier: String?,
+        corroboratingPersistentRefHash _: String? = nil) -> String?
+    {
+        guard let normalizedIdentifier = historyOwnerIdentifier?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased(),
+            normalizedIdentifier.count == 64,
+            normalizedIdentifier.allSatisfy(\.isHexDigit)
+        else {
+            return nil
+        }
+        let digest = self.sha256Hex("claude:oauth-history-owner:v2:\(normalizedIdentifier)")
+        return "\(self.claudeOAuthPlanUtilizationAccountKeyPrefix)\(digest)"
+    }
+
+    private nonisolated static func isClaudeOAuthPlanUtilizationAccountKey(_ accountKey: String?) -> Bool {
+        accountKey?.hasPrefix(self.claudeOAuthPlanUtilizationAccountKeyPrefix) == true
+    }
+
     private nonisolated static func planUtilizationIdentityAccountKey(
         provider: UsageProvider,
         snapshot: UsageSnapshot) -> String?
     {
-        guard let identity = snapshot.identity(for: provider) else { return nil }
+        guard let identity = snapshot.identity(for: provider.instanceID) else { return nil }
 
         let normalizedEmail = identity.accountEmail?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
         if let normalizedEmail, !normalizedEmail.isEmpty {
+            // Provider-specific by design: Codex hashes email ownership; Claude also binds organization and plan.
             if provider == .codex {
                 return CodexHistoryOwnership.canonicalEmailHashKey(for: normalizedEmail)
             }
@@ -629,32 +870,7 @@ extension UsageStore {
         provider == .claude && self.shouldHidePlanUtilizationMenuItem(for: .claude)
     }
 
-    private func weeklyLimitResetAccountIdentifier(
-        provider: UsageProvider,
-        account: ProviderTokenAccount?,
-        snapshot: UsageSnapshot,
-        accountKey: String?) -> String
-    {
-        let identity = snapshot.identity(for: provider)
-        return account?.id.uuidString.lowercased()
-            ?? accountKey
-            ?? identity?.accountEmail
-            ?? identity?.accountOrganization
-            ?? provider.rawValue
-    }
-
-    private func weeklyLimitResetAccountLabel(
-        provider: UsageProvider,
-        account: ProviderTokenAccount?,
-        snapshot: UsageSnapshot) -> String?
-    {
-        let identity = snapshot.identity(for: provider)
-        return account?.label
-            ?? identity?.accountEmail
-            ?? identity?.accountOrganization
-    }
-
-    private nonisolated static func weeklyLimitResetDetectorStateKey(
+    nonisolated static func limitResetDetectorStateKey(
         provider: UsageProvider,
         accountIdentifier: String) -> String
     {
@@ -662,26 +878,206 @@ extension UsageStore {
     }
 
     nonisolated static func loadWeeklyLimitResetDetectorStates(from userDefaults: UserDefaults)
-        -> [String: WeeklyLimitResetDetectorState]
+        -> [String: LimitResetDetectorState]
     {
-        guard let data = userDefaults.data(forKey: self.weeklyLimitResetDetectorDefaultsKey) else { return [:] }
+        var states = self.loadLimitResetDetectorStates(
+            from: userDefaults,
+            defaultsKey: self.weeklyLimitResetDetectorDefaultsKey,
+            logName: "weekly")
+        let legacyClaudeLowStateKeys = states.compactMap { key, state in
+            key.hasPrefix("\(UsageProvider.claude.rawValue):")
+                && !state.wasAboveThreshold
+                && state.recoveryAboveThresholdCount == nil
+                ? key
+                : nil
+        }
+        for key in legacyClaudeLowStateKeys {
+            guard var migratedState = states[key] else { continue }
+            migratedState.recoveryAboveThresholdCount = 0
+            states[key] = migratedState
+        }
+        return states
+    }
+
+    nonisolated static func loadLimitResetDetectorStates(
+        from userDefaults: UserDefaults,
+        defaultsKey: String,
+        logName: String) -> [String: LimitResetDetectorState]
+    {
+        guard let data = userDefaults.data(forKey: defaultsKey) else { return [:] }
         do {
-            return try JSONDecoder().decode([String: WeeklyLimitResetDetectorState].self, from: data)
+            return try JSONDecoder().decode([String: LimitResetDetectorState].self, from: data)
         } catch {
             CodexBarLog.logger(LogCategories.confetti).error(
-                "Failed to decode weekly limit reset detector state",
+                "Failed to decode \(logName) limit reset detector state",
                 metadata: ["error": String(describing: error)])
             return [:]
         }
     }
 
-    private func persistWeeklyLimitResetDetectorStates() {
+    func persistLimitResetDetectorStates(
+        _ states: [String: LimitResetDetectorState],
+        defaultsKey: String,
+        logName: String)
+    {
         do {
-            let data = try JSONEncoder().encode(self.weeklyLimitResetDetectorStates)
-            self.settings.userDefaults.set(data, forKey: Self.weeklyLimitResetDetectorDefaultsKey)
+            let data = try JSONEncoder().encode(states)
+            self.settings.userDefaults.set(data, forKey: defaultsKey)
         } catch {
             CodexBarLog.logger(LogCategories.confetti).error(
-                "Failed to encode weekly limit reset detector state",
+                "Failed to encode \(logName) limit reset detector state",
+                metadata: ["error": String(describing: error)])
+        }
+    }
+
+    /// Persisted `historyOwnerIdentifier -> hashed active account identity` bindings.
+    nonisolated static func loadClaudeOAuthAccountUuidMap(from userDefaults: UserDefaults) -> [String: String] {
+        // V1 values hash only the account UUID. V2 adds the owner-selected Claude config path, so a
+        // V1 binding can never match after upgrade and would quarantine owner-mediated samples forever.
+        // The history owner key itself is unchanged, so discarding the obsolete binding preserves history.
+        if userDefaults.object(forKey: self.claudeOAuthAccountUuidMapLegacyDefaultsKey) != nil {
+            userDefaults.removeObject(forKey: self.claudeOAuthAccountUuidMapLegacyDefaultsKey)
+        }
+        guard let data = userDefaults.data(forKey: claudeOAuthAccountUuidMapDefaultsKey) else { return [:] }
+        do {
+            return try JSONDecoder().decode([String: String].self, from: data)
+        } catch {
+            CodexBarLog.logger(LogCategories.confetti).error(
+                "Failed to decode Claude OAuth history owner account UUID map",
+                metadata: ["error": String(describing: error)])
+            return [:]
+        }
+    }
+
+    /// Persist the `historyOwnerIdentifier -> active accountUuid` map. Mirrors `persistLimitResetDetectorStates`.
+    func persistClaudeOAuthAccountUuidMap(_ map: [String: String]) {
+        do {
+            let data = try JSONEncoder().encode(map)
+            self.settings.userDefaults.set(data, forKey: Self.claudeOAuthAccountUuidMapDefaultsKey)
+        } catch {
+            CodexBarLog.logger(LogCategories.confetti).error(
+                "Failed to encode Claude OAuth history owner account UUID map",
+                metadata: ["error": String(describing: error)])
+        }
+    }
+
+    nonisolated static func loadClaudeOAuthAccountBindingCandidateMap(
+        from userDefaults: UserDefaults) -> [String: ClaudeOAuthAccountBindingCandidate]
+    {
+        guard let data = userDefaults.data(forKey: claudeOAuthAccountCandidateMapDefaultsKey) else { return [:] }
+        do {
+            return try JSONDecoder().decode([String: ClaudeOAuthAccountBindingCandidate].self, from: data)
+        } catch {
+            CodexBarLog.logger(LogCategories.confetti).error(
+                "Failed to decode Claude OAuth account binding candidates",
+                metadata: ["error": String(describing: error)])
+            return [:]
+        }
+    }
+
+    private func confirmClaudeOAuthAccountBindingCandidate(
+        owner: String,
+        identity: String,
+        observedAt: Date) -> Bool
+    {
+        var candidates = Self.loadClaudeOAuthAccountBindingCandidateMap(from: self.settings.userDefaults)
+        if let candidate = candidates[owner],
+           candidate.identity == identity,
+           candidate.observedAt < observedAt
+        {
+            candidates.removeValue(forKey: owner)
+            self.persistClaudeOAuthAccountBindingCandidateMap(candidates)
+            return true
+        }
+        candidates[owner] = ClaudeOAuthAccountBindingCandidate(identity: identity, observedAt: observedAt)
+        self.persistClaudeOAuthAccountBindingCandidateMap(candidates)
+        return false
+    }
+
+    private func resolvedClaudeOAuthHistoryOwner(evidence: ClaudeOAuthHistoryEvidence) -> String? {
+        let requiresClaudeCodeCorroboration = evidence.persistentRefHash != nil
+            || evidence.keychainCredentialMismatch
+            || evidence.keychainCredentialAbsent
+            || evidence.keychainCredentialUnavailable
+        guard requiresClaudeCodeCorroboration else {
+            // Explicit/environment credentials do not belong to Claude Code's active-account lifecycle.
+            return evidence.owner
+        }
+        guard case let .stable(currentAccountIdentity) = evidence.activeAccountObservation else {
+            // An account/credential change while capturing the UUID cannot safely identify this sample.
+            return nil
+        }
+        var map = Self.loadClaudeOAuthAccountUuidMap(from: self.settings.userDefaults)
+        if let mapped = map[evidence.owner] {
+            guard let currentAccountIdentity else {
+                return evidence.keychainCredentialMismatch || evidence.keychainCredentialUnavailable
+                    ? nil
+                    : evidence.owner
+            }
+            guard mapped != currentAccountIdentity else {
+                self.clearClaudeOAuthAccountBindingCandidate(owner: evidence.owner)
+                return evidence.owner
+            }
+            guard evidence.persistentRefHash != nil,
+                  self.confirmClaudeOAuthAccountBindingCandidate(
+                      owner: evidence.owner,
+                      identity: currentAccountIdentity,
+                      observedAt: evidence.observedAt)
+            else {
+                return nil
+            }
+            // Two stable exact-Keychain observations repair a binding poisoned by a non-atomic login.
+            map[evidence.owner] = currentAccountIdentity
+            self.persistClaudeOAuthAccountUuidMap(map)
+            return evidence.owner
+        }
+
+        if evidence.keychainCredentialUnavailable,
+           !evidence.keychainCredentialMismatch
+        {
+            // With no authoritative binding, the secret-derived file owner is the only safe bootstrap scope.
+            // Existing bindings are checked above, so normal background gating cannot bypass a detected switch.
+            return evidence.owner
+        }
+        if evidence.keychainCredentialAbsent {
+            // A proven-empty Keychain leaves the file credential as the only owner. Existing bindings were
+            // checked above, so an unbound owner is safe without inventing account continuity.
+            return evidence.owner
+        }
+
+        guard let currentAccountIdentity else {
+            return evidence.keychainCredentialMismatch || evidence.keychainCredentialUnavailable
+                ? nil
+                : evidence.owner
+        }
+        guard evidence.persistentRefHash != nil else { return nil }
+        // Two stable exact-Keychain observations are required before a first binding becomes authoritative.
+        if self.confirmClaudeOAuthAccountBindingCandidate(
+            owner: evidence.owner,
+            identity: currentAccountIdentity,
+            observedAt: evidence.observedAt)
+        {
+            map[evidence.owner] = currentAccountIdentity
+            self.persistClaudeOAuthAccountUuidMap(map)
+        }
+        return evidence.owner
+    }
+
+    private func clearClaudeOAuthAccountBindingCandidate(owner: String) {
+        var candidates = Self.loadClaudeOAuthAccountBindingCandidateMap(from: self.settings.userDefaults)
+        guard candidates.removeValue(forKey: owner) != nil else { return }
+        self.persistClaudeOAuthAccountBindingCandidateMap(candidates)
+    }
+
+    private func persistClaudeOAuthAccountBindingCandidateMap(
+        _ candidates: [String: ClaudeOAuthAccountBindingCandidate])
+    {
+        do {
+            let data = try JSONEncoder().encode(candidates)
+            self.settings.userDefaults.set(data, forKey: Self.claudeOAuthAccountCandidateMapDefaultsKey)
+        } catch {
+            CodexBarLog.logger(LogCategories.confetti).error(
+                "Failed to encode Claude OAuth account binding candidates",
                 metadata: ["error": String(describing: error)])
         }
     }
@@ -690,10 +1086,14 @@ extension UsageStore {
         provider: UsageProvider,
         snapshot: UsageSnapshot?,
         preferredAccount: ProviderTokenAccount?,
+        claudeOAuthPersistentRefHash: String? = nil,
+        claudeOAuthHistoryOwnerIdentifier: String? = nil,
+        isClaudeOAuthSample: Bool = false,
         shouldUpdatePreferredAccountKey: Bool = true,
         shouldAdoptUnscopedHistory: Bool = true,
         providerBuckets: inout PlanUtilizationHistoryBuckets) -> String?
     {
+        // Provider-specific by design: Codex reconciliation and Claude OAuth use distinct persisted owner migrations.
         if provider == .codex {
             return self.resolveCodexPlanUtilizationAccountKey(
                 snapshot: snapshot,
@@ -702,12 +1102,36 @@ extension UsageStore {
                 providerBuckets: &providerBuckets)
         }
 
-        let resolvedAccount = preferredAccount ?? self.settings.selectedTokenAccount(for: provider)
+        // Claude's unscoped history is only safe to adopt during the first unambiguous migration.
+        // The sentinel marks identityless OAuth, while any scoped bucket proves multiple owners may exist.
+        let canAdoptUnscopedHistory = shouldAdoptUnscopedHistory
+            && !(provider == .claude
+                && (providerBuckets.preferredAccountKey == Self.planUtilizationUnscopedPreferredKey
+                    || !providerBuckets.accounts.isEmpty))
+
+        if provider == .claude, isClaudeOAuthSample {
+            if let oauthAccountKey = Self.claudeOAuthPlanUtilizationAccountKey(
+                historyOwnerIdentifier: claudeOAuthHistoryOwnerIdentifier,
+                corroboratingPersistentRefHash: claudeOAuthPersistentRefHash)
+            {
+                if shouldUpdatePreferredAccountKey {
+                    providerBuckets.preferredAccountKey = oauthAccountKey
+                }
+                // Existing unscoped or identity-keyed history can belong to another OAuth account.
+                // Preserve it in place rather than silently adopting it into this opaque account.
+                return oauthAccountKey
+            }
+            // Never append identityless OAuth samples to the shared unscoped bucket. A future fetch with
+            // trustworthy ownership evidence can start a scoped history without inheriting this sample.
+            return nil
+        }
+
+        let resolvedAccount = preferredAccount ?? self.settings.effectiveSelectedTokenAccount(for: provider)
         if let tokenAccountKey = Self.planUtilizationAccountKey(provider: provider, account: resolvedAccount) {
             if shouldUpdatePreferredAccountKey {
                 providerBuckets.preferredAccountKey = tokenAccountKey
             }
-            if shouldAdoptUnscopedHistory {
+            if canAdoptUnscopedHistory {
                 self.adoptPlanUtilizationUnscopedHistoryIfNeeded(
                     into: tokenAccountKey,
                     provider: provider,
@@ -727,7 +1151,7 @@ extension UsageStore {
             if shouldUpdatePreferredAccountKey {
                 providerBuckets.preferredAccountKey = resolvedIdentityAccountKey
             }
-            if shouldAdoptUnscopedHistory {
+            if canAdoptUnscopedHistory {
                 self.adoptPlanUtilizationUnscopedHistoryIfNeeded(
                     into: resolvedIdentityAccountKey,
                     provider: provider,
@@ -827,6 +1251,7 @@ extension UsageStore {
         for rawKey in legacyRawKeysToRemove {
             providerBuckets.accounts.removeValue(forKey: rawKey)
         }
+        // Provider-specific by design: legacy Codex email/workspace buckets merge only after ambiguity checks.
         let mergedHistory = Self.mergedPlanUtilizationHistories(provider: .codex, histories: historiesToMerge)
         providerBuckets.setHistories(mergedHistory, for: canonicalKey)
         return canonicalKey
@@ -853,7 +1278,7 @@ extension UsageStore {
         snapshot: UsageSnapshot,
         providerBuckets: inout PlanUtilizationHistoryBuckets) -> String
     {
-        guard provider == .claude,
+        guard provider == .claude, // Provider-specific by design: only Claude has this legacy email-key history.
               let legacyAccountKey = Self.legacyClaudePlanUtilizationEmailAccountKey(snapshot: snapshot),
               legacyAccountKey != accountKey,
               let legacyHistories = providerBuckets.accounts[legacyAccountKey],
@@ -883,17 +1308,29 @@ extension UsageStore {
         guard !providerBuckets.unscoped.isEmpty else { return }
 
         let existingHistory = providerBuckets.accounts[accountKey] ?? []
+        let targetHasHistory = !existingHistory.isEmpty
         let mergedHistory = Self.mergedPlanUtilizationHistories(provider: provider, histories: [
             existingHistory,
             providerBuckets.unscoped,
         ])
         providerBuckets.setHistories(mergedHistory, for: accountKey)
         providerBuckets.setHistories([], for: nil)
+        if ![UsageProvider.codex, .claude, .antigravity].contains(provider) {
+            self.materializeLegacySessionEquivalentHistoryIdentityDuringAccountAdoption(
+                provider: provider,
+                from: nil,
+                to: accountKey,
+                targetHasHistory: targetHasHistory,
+                providerBuckets: &providerBuckets)
+        }
     }
 
     private func stickyPlanUtilizationAccountKey(
         providerBuckets: PlanUtilizationHistoryBuckets) -> String?
     {
+        if providerBuckets.preferredAccountKey == Self.planUtilizationUnscopedPreferredKey {
+            return nil
+        }
         let knownAccountKeys = self.knownPlanUtilizationAccountKeys(providerBuckets: providerBuckets)
         guard !knownAccountKeys.isEmpty else { return nil }
 
@@ -994,7 +1431,7 @@ extension UsageStore {
         return true
     }
 
-    private nonisolated static func areEquivalentPlanUtilizationResetBoundaries(_ lhs: Date?, _ rhs: Date?) -> Bool {
+    nonisolated static func areEquivalentPlanUtilizationResetBoundaries(_ lhs: Date?, _ rhs: Date?) -> Bool {
         guard let lhs, let rhs else { return false }
         return abs(lhs.timeIntervalSince(rhs)) < self.planUtilizationResetEquivalenceToleranceSeconds
     }
@@ -1131,6 +1568,15 @@ extension UsageStore {
         self.planUtilizationAccountKey(provider: provider, account: account)
     }
 
+    nonisolated static func _claudeOAuthPlanUtilizationAccountKeyForTesting(
+        historyOwnerIdentifier: String?,
+        persistentRefHash: String? = nil) -> String?
+    {
+        self.claudeOAuthPlanUtilizationAccountKey(
+            historyOwnerIdentifier: historyOwnerIdentifier,
+            corroboratingPersistentRefHash: persistentRefHash)
+    }
+
     nonisolated static func _legacyClaudePlanUtilizationEmailAccountKeyForTesting(snapshot: UsageSnapshot) -> String? {
         self.legacyClaudePlanUtilizationEmailAccountKey(snapshot: snapshot)
     }
@@ -1145,14 +1591,14 @@ extension UsageStore {
 
 actor PlanUtilizationHistoryPersistenceCoordinator {
     private let store: PlanUtilizationHistoryStore
-    private var pendingSnapshot: [UsageProvider: PlanUtilizationHistoryBuckets]?
+    private var pendingSnapshot: [ProviderInstanceID: PlanUtilizationHistoryBuckets]?
     private var isPersisting: Bool = false
 
     init(store: PlanUtilizationHistoryStore) {
         self.store = store
     }
 
-    func enqueue(_ snapshot: [UsageProvider: PlanUtilizationHistoryBuckets]) {
+    func enqueue(_ snapshot: [ProviderInstanceID: PlanUtilizationHistoryBuckets]) {
         self.pendingSnapshot = snapshot
         guard !self.isPersisting else { return }
         self.isPersisting = true
@@ -1171,7 +1617,7 @@ actor PlanUtilizationHistoryPersistenceCoordinator {
         self.isPersisting = false
     }
 
-    private func saveAsync(_ snapshot: [UsageProvider: PlanUtilizationHistoryBuckets]) async {
+    private func saveAsync(_ snapshot: [ProviderInstanceID: PlanUtilizationHistoryBuckets]) async {
         let store = self.store
         await Task.detached(priority: .utility) {
             store.save(snapshot)

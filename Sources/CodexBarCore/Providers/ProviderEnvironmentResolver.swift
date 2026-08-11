@@ -23,6 +23,9 @@ public enum ProviderEnvironmentResolver {
         {
             environment.merge(override) { _, selectedAccountValue in selectedAccountValue }
         }
+        ProviderDescriptorRegistry.descriptor(for: provider).credentials?.applySelectedAccount(
+            environment: &environment,
+            account: selectedAccount)
         return environment
     }
 }

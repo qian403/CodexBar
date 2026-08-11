@@ -1,5 +1,83 @@
 import Foundation
 
+package struct CostUsageTokenActivityCache: Sendable, Equatable {
+    package let daily: [CostUsageDailyReport.Entry]
+    package let coverageSinceKey: String
+    package let coverageUntilKey: String
+
+    package init(
+        daily: [CostUsageDailyReport.Entry],
+        coverageSinceKey: String,
+        coverageUntilKey: String)
+    {
+        self.daily = daily
+        self.coverageSinceKey = coverageSinceKey
+        self.coverageUntilKey = coverageUntilKey
+    }
+}
+
+public struct CostUsageWindowSummary: Sendable, Equatable {
+    public let days: Int
+    public let totalTokens: Int?
+    public let totalCostUSD: Double?
+    public let totalRequests: Int?
+    public let entryCount: Int
+
+    public init(
+        days: Int,
+        totalTokens: Int?,
+        totalCostUSD: Double?,
+        totalRequests: Int?,
+        entryCount: Int)
+    {
+        self.days = days
+        self.totalTokens = totalTokens
+        self.totalCostUSD = totalCostUSD
+        self.totalRequests = totalRequests
+        self.entryCount = entryCount
+    }
+}
+
+/// An estimated local Codex conversation total derived from one session log.
+/// This is intentionally distinct from account-level billing or quota data.
+public struct CostUsageSessionBreakdown: Sendable, Equatable, Identifiable {
+    public let sessionID: String
+    public let lastActivity: Date
+    public let inputTokens: Int?
+    public let cachedInputTokens: Int?
+    public let outputTokens: Int?
+    public let totalTokens: Int?
+    public let requestCount: Int?
+    public let costUSD: Double?
+    public let modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]
+
+    public var id: String {
+        self.sessionID
+    }
+
+    public init(
+        sessionID: String,
+        lastActivity: Date,
+        inputTokens: Int?,
+        cachedInputTokens: Int?,
+        outputTokens: Int?,
+        totalTokens: Int?,
+        requestCount: Int?,
+        costUSD: Double?,
+        modelBreakdowns: [CostUsageDailyReport.ModelBreakdown])
+    {
+        self.sessionID = sessionID
+        self.lastActivity = lastActivity
+        self.inputTokens = inputTokens
+        self.cachedInputTokens = cachedInputTokens
+        self.outputTokens = outputTokens
+        self.totalTokens = totalTokens
+        self.requestCount = requestCount
+        self.costUSD = costUSD
+        self.modelBreakdowns = modelBreakdowns
+    }
+}
+
 public struct CostUsageTokenSnapshot: Sendable, Equatable {
     public let sessionTokens: Int?
     public let sessionCostUSD: Double?
@@ -9,8 +87,18 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
     public let last30DaysRequests: Int?
     public let currencyCode: String
     public let historyDays: Int
+    public let historyCoverageIsEstablished: Bool
     public let historyLabel: String?
+    /// Provider-metered spend over the same window as `last30DaysCostUSD` — what the plan
+    /// actually deducts, as opposed to the API-rate estimate. Only some providers (e.g. Cursor)
+    /// report this; `nil` when unknown.
+    public let meteredCostUSD: Double?
+    /// Internal credential scope used to prevent cross-account cache publication. This is a
+    /// non-reversible fingerprint, not account identity, and is not emitted by CLI payloads.
+    public let credentialScopeFingerprint: String?
     public let daily: [CostUsageDailyReport.Entry]
+    public let projects: [CostUsageProjectBreakdown]
+    public let sessions: [CostUsageSessionBreakdown]
     public let updatedAt: Date
 
     public init(
@@ -22,8 +110,13 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
         last30DaysRequests: Int? = nil,
         currencyCode: String = "USD",
         historyDays: Int = 30,
+        historyCoverageIsEstablished: Bool = true,
         historyLabel: String? = nil,
+        meteredCostUSD: Double? = nil,
+        credentialScopeFingerprint: String? = nil,
         daily: [CostUsageDailyReport.Entry],
+        projects: [CostUsageProjectBreakdown] = [],
+        sessions: [CostUsageSessionBreakdown] = [],
         updatedAt: Date)
     {
         self.sessionTokens = sessionTokens
@@ -32,13 +125,166 @@ public struct CostUsageTokenSnapshot: Sendable, Equatable {
         self.last30DaysTokens = last30DaysTokens
         self.last30DaysCostUSD = last30DaysCostUSD
         self.last30DaysRequests = last30DaysRequests
-        self.currencyCode = currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? "USD"
-            : currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let normalizedCurrencyCode = currencyCode.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        self.currencyCode = normalizedCurrencyCode.isEmpty ? "XXX" : normalizedCurrencyCode
         self.historyDays = historyDays
+        self.historyCoverageIsEstablished = historyCoverageIsEstablished
         self.historyLabel = historyLabel
+        self.meteredCostUSD = meteredCostUSD
+        self.credentialScopeFingerprint = credentialScopeFingerprint
         self.daily = daily
+        self.projects = projects
+        self.sessions = sessions
         self.updatedAt = updatedAt
+    }
+
+    public func currentDayEntry(calendar: Calendar = .current) -> CostUsageDailyReport.Entry? {
+        Self.entry(in: self.daily, forLocalDayContaining: self.updatedAt, calendar: calendar)
+    }
+
+    public func summary(forLastDays requestedDays: Int, calendar: Calendar = .current) -> CostUsageWindowSummary {
+        let days = max(1, requestedDays)
+        let today = calendar.startOfDay(for: self.updatedAt)
+        let start = calendar.date(byAdding: .day, value: -(days - 1), to: today) ?? today
+        let startKey = CostUsageLocalDay.key(from: start, calendar: calendar)
+        let endKey = CostUsageLocalDay.key(from: today, calendar: calendar)
+        let entries = self.daily.filter { entry in
+            guard let dayKey = Self.localDayKey(for: entry.date, calendar: calendar) else { return false }
+            return dayKey >= startKey && dayKey <= endKey
+        }
+        let costs = entries.compactMap(\.costUSD)
+        let tokens = entries.compactMap(\.totalTokens)
+        let requests = entries.compactMap(\.requestCount)
+        return CostUsageWindowSummary(
+            days: days,
+            totalTokens: tokens.isEmpty ? nil : tokens.reduce(0, +),
+            totalCostUSD: costs.isEmpty ? nil : costs.reduce(0, +),
+            totalRequests: requests.isEmpty ? nil : requests.reduce(0, +),
+            entryCount: entries.count)
+    }
+
+    public func comparisonSummaries(
+        periods: [Int] = [7, 30, 90],
+        calendar: Calendar = .current) -> [CostUsageWindowSummary]
+    {
+        Array(Set(periods.map { max(1, $0) }))
+            .filter { $0 < self.historyDays }
+            .sorted()
+            .map { self.summary(forLastDays: $0, calendar: calendar) }
+    }
+
+    public static func latestEntry(in entries: [CostUsageDailyReport.Entry]) -> CostUsageDailyReport.Entry? {
+        entries.compactMap { entry -> (entry: CostUsageDailyReport.Entry, date: Date)? in
+            guard let date = CostUsageDateParser.parse(entry.date) else { return nil }
+            return (entry, date)
+        }
+        .max { lhs, rhs in
+            if lhs.date != rhs.date {
+                return lhs.date < rhs.date
+            }
+            let lCost = lhs.entry.costUSD ?? -1
+            let rCost = rhs.entry.costUSD ?? -1
+            if lCost != rCost {
+                return lCost < rCost
+            }
+            let lTokens = lhs.entry.totalTokens ?? -1
+            let rTokens = rhs.entry.totalTokens ?? -1
+            if lTokens != rTokens {
+                return lTokens < rTokens
+            }
+            return lhs.entry.date < rhs.entry.date
+        }?.entry
+    }
+
+    public static func entry(
+        in entries: [CostUsageDailyReport.Entry],
+        forLocalDayContaining date: Date,
+        calendar: Calendar = .current) -> CostUsageDailyReport.Entry?
+    {
+        let dayKey = CostUsageLocalDay.key(from: date, calendar: calendar)
+        return entries.first { entry in
+            let rawDate = entry.date.trimmingCharacters(in: .whitespacesAndNewlines)
+            if rawDate == dayKey {
+                return true
+            }
+            guard let parsed = CostUsageDateParser.parse(rawDate) else { return false }
+            return CostUsageLocalDay.key(from: parsed, calendar: calendar) == dayKey
+        }
+    }
+
+    private static func localDayKey(for rawDate: String, calendar: Calendar) -> String? {
+        let trimmed = rawDate.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.count >= 10 {
+            let prefix = String(trimmed.prefix(10))
+            if prefix.count == 10, prefix[prefix.index(prefix.startIndex, offsetBy: 4)] == "-",
+               prefix[prefix.index(prefix.startIndex, offsetBy: 7)] == "-"
+            {
+                return prefix
+            }
+        }
+        guard let parsed = CostUsageDateParser.parse(trimmed) else { return nil }
+        return CostUsageLocalDay.key(from: parsed, calendar: calendar)
+    }
+}
+
+public struct CostUsageProjectBreakdown: Sendable, Equatable {
+    public static let unknownProjectName = "Unknown project"
+
+    public let name: String
+    public let path: String?
+    public let totalTokens: Int?
+    public let totalCostUSD: Double?
+    public let daily: [CostUsageDailyReport.Entry]
+    public let modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]?
+    public let sources: [CostUsageProjectSourceBreakdown]
+
+    public init(
+        name: String,
+        path: String?,
+        totalTokens: Int?,
+        totalCostUSD: Double?,
+        daily: [CostUsageDailyReport.Entry],
+        modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]?,
+        sources: [CostUsageProjectSourceBreakdown] = [])
+    {
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? Self.unknownProjectName
+            : name
+        let cleanPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.path = cleanPath?.isEmpty == true ? nil : cleanPath
+        self.totalTokens = totalTokens
+        self.totalCostUSD = totalCostUSD
+        self.daily = daily
+        self.modelBreakdowns = modelBreakdowns
+        self.sources = sources
+    }
+}
+
+public struct CostUsageProjectSourceBreakdown: Sendable, Equatable {
+    public let name: String
+    public let path: String?
+    public let totalTokens: Int?
+    public let totalCostUSD: Double?
+    public let daily: [CostUsageDailyReport.Entry]
+    public let modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]?
+
+    public init(
+        name: String,
+        path: String?,
+        totalTokens: Int?,
+        totalCostUSD: Double?,
+        daily: [CostUsageDailyReport.Entry],
+        modelBreakdowns: [CostUsageDailyReport.ModelBreakdown]?)
+    {
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? CostUsageProjectBreakdown.unknownProjectName
+            : name
+        let cleanPath = path?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.path = cleanPath?.isEmpty == true ? nil : cleanPath
+        self.totalTokens = totalTokens
+        self.totalCostUSD = totalCostUSD
+        self.daily = daily
+        self.modelBreakdowns = modelBreakdowns
     }
 }
 
@@ -184,8 +430,12 @@ public struct CostUsageDailyReport: Sendable, Decodable {
                 (try? container.decodeIfPresent([String].self, forKey: key)).flatMap(\.self)
             }
 
-            if let modelsUsed = decodeStringList(.modelsUsed) { return modelsUsed }
-            if let models = decodeStringList(.models) { return models }
+            if let modelsUsed = decodeStringList(.modelsUsed) {
+                return modelsUsed
+            }
+            if let models = decodeStringList(.models) {
+                return models
+            }
 
             guard container.contains(.models) else { return nil }
 
@@ -734,27 +984,38 @@ private struct CostUsageAnyCodingKey: CodingKey {
 }
 
 enum CostUsageDateParser {
+    private static let isoWithFractionalSecondsKey = "CostUsageDateParser.isoWithFractionalSeconds"
+    private static let isoInternetDateTimeKey = "CostUsageDateParser.isoInternetDateTime"
+    private static let dayFormatterKey = "CostUsageDateParser.dayFormatter"
+    private static let monthDayYearFormatterKey = "CostUsageDateParser.monthDayYearFormatter"
+    private static let monthYearFormatterKey = "CostUsageDateParser.monthYearFormatter"
+    private static let fullMonthYearFormatterKey = "CostUsageDateParser.fullMonthYearFormatter"
+    private static let yearMonthFormatterKey = "CostUsageDateParser.yearMonthFormatter"
+
     static func parse(_ text: String?) -> Date? {
         guard let text, !text.isEmpty else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = iso.date(from: trimmed) { return d }
-        iso.formatOptions = [.withInternetDateTime]
-        if let d = iso.date(from: trimmed) { return d }
-
-        let day = DateFormatter()
-        day.locale = Locale(identifier: "en_US_POSIX")
-        day.timeZone = TimeZone.current
-        day.dateFormat = "yyyy-MM-dd"
-        if let d = day.date(from: trimmed) { return d }
-
-        let monthDayYear = DateFormatter()
-        monthDayYear.locale = Locale(identifier: "en_US_POSIX")
-        monthDayYear.timeZone = TimeZone.current
-        monthDayYear.dateFormat = "MMM d, yyyy"
-        if let d = monthDayYear.date(from: trimmed) { return d }
+        if let d = self.isoFormatter(
+            key: self.isoWithFractionalSecondsKey,
+            options: [.withInternetDateTime, .withFractionalSeconds])
+            .date(from: trimmed)
+        {
+            return d
+        }
+        if let d = self.isoFormatter(key: self.isoInternetDateTimeKey, options: [.withInternetDateTime])
+            .date(from: trimmed)
+        {
+            return d
+        }
+        if let d = self.dateFormatter(key: self.dayFormatterKey, format: "yyyy-MM-dd").date(from: trimmed) {
+            return d
+        }
+        if let d = self.dateFormatter(key: self.monthDayYearFormatterKey, format: "MMM d, yyyy")
+            .date(from: trimmed)
+        {
+            return d
+        }
 
         return nil
     }
@@ -763,24 +1024,74 @@ enum CostUsageDateParser {
         guard let text, !text.isEmpty else { return nil }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        let monthYear = DateFormatter()
-        monthYear.locale = Locale(identifier: "en_US_POSIX")
-        monthYear.timeZone = TimeZone.current
-        monthYear.dateFormat = "MMM yyyy"
-        if let d = monthYear.date(from: trimmed) { return d }
-
-        let fullMonthYear = DateFormatter()
-        fullMonthYear.locale = Locale(identifier: "en_US_POSIX")
-        fullMonthYear.timeZone = TimeZone.current
-        fullMonthYear.dateFormat = "MMMM yyyy"
-        if let d = fullMonthYear.date(from: trimmed) { return d }
-
-        let ym = DateFormatter()
-        ym.locale = Locale(identifier: "en_US_POSIX")
-        ym.timeZone = TimeZone.current
-        ym.dateFormat = "yyyy-MM"
-        if let d = ym.date(from: trimmed) { return d }
+        if let d = self.dateFormatter(key: self.monthYearFormatterKey, format: "MMM yyyy").date(from: trimmed) {
+            return d
+        }
+        if let d = self.dateFormatter(key: self.fullMonthYearFormatterKey, format: "MMMM yyyy").date(from: trimmed) {
+            return d
+        }
+        if let d = self.dateFormatter(key: self.yearMonthFormatterKey, format: "yyyy-MM").date(from: trimmed) {
+            return d
+        }
 
         return nil
+    }
+
+    private static func isoFormatter(
+        key: String,
+        options: ISO8601DateFormatter.Options) -> ISO8601DateFormatter
+    {
+        let threadDict = Thread.current.threadDictionary
+        if let cached = threadDict[key] as? ISO8601DateFormatter {
+            return cached
+        }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = options
+        threadDict[key] = formatter
+        return formatter
+    }
+
+    private static func dateFormatter(key: String, format: String) -> DateFormatter {
+        let threadDict = Thread.current.threadDictionary
+        let timeZone = TimeZone.current
+        let cacheKey = "\(key).\(timeZone.identifier)"
+        if let cached = threadDict[cacheKey] as? DateFormatter {
+            return cached
+        }
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = format
+        formatter.isLenient = false
+        threadDict[cacheKey] = formatter
+        return formatter
+    }
+}
+
+enum CostUsageBucketInterval {
+    static func contains(
+        _ date: Date,
+        startTime: Date,
+        endTime: Date) -> Bool
+    {
+        guard startTime < endTime else { return false }
+        return startTime <= date && date < endTime
+    }
+}
+
+enum CostUsageLocalDay {
+    static func gregorianCalendar(matching calendar: Calendar = .current) -> Calendar {
+        var gregorian = Calendar(identifier: .gregorian)
+        gregorian.timeZone = calendar.timeZone
+        return gregorian
+    }
+
+    static func key(from date: Date, calendar: Calendar = .current) -> String {
+        let calendar = Self.gregorianCalendar(matching: calendar)
+        let components = calendar.dateComponents([.year, .month, .day], from: date)
+        let year = components.year ?? 0
+        let month = components.month ?? 0
+        let day = components.day ?? 0
+        return String(format: "%04d-%02d-%02d", year, month, day)
     }
 }

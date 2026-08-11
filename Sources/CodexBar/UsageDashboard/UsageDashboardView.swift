@@ -335,7 +335,7 @@ struct UsageDashboardView: View {
     }
 
     private func limitRows(provider: UsageProvider) -> [LimitRow] {
-        guard let snapshot = self.store.snapshot(for: provider) else { return [] }
+        guard let snapshot = self.store.snapshot(for: provider.instanceID) else { return [] }
         let meta = self.store.metadata(for: provider)
         let style = self.settings.resetTimeDisplayStyle
         var rows: [LimitRow] = []
@@ -361,12 +361,12 @@ struct UsageDashboardView: View {
     }
 
     private func updatedText(provider: UsageProvider) -> String? {
-        guard let snapshot = self.store.snapshot(for: provider) else { return nil }
+        guard let snapshot = self.store.snapshot(for: provider.instanceID) else { return nil }
         return UsageFormatter.updatedString(from: snapshot.updatedAt)
     }
 
     private func spendText(provider: UsageProvider) -> String? {
-        guard let cost = self.store.snapshot(for: provider)?.providerCost else { return nil }
+        guard let cost = self.store.snapshot(for: provider.instanceID)?.providerCost else { return nil }
         let used = UsageFormatter.currencyString(cost.used, currencyCode: cost.currencyCode)
         let limit = UsageFormatter.currencyString(cost.limit, currencyCode: cost.currencyCode)
         var text = cost.limit > 0 ? "\(used) / \(limit)" : used
@@ -390,6 +390,7 @@ struct UsageDashboardView: View {
 
     /// Only OpenCode and OpenCode Go expose per-request granularity today;
     /// Codex/Claude/VertexAI readers don't produce per-message entries.
+    /// Provider-specific by design: per-request rows currently exist only in the OpenCode SQLite reader.
     private var shouldShowRequestLog: Bool {
         if case let .provider(provider) = self.selection,
            provider == .opencode || provider == .opencodego
@@ -445,6 +446,7 @@ struct UsageDashboardView: View {
         self.openWindowEnv(id: OpenCodeRequestLogWindow.id)
     }
 
+    /// Provider-specific by design: per-request rows currently exist only in the OpenCode SQLite reader.
     private func loadRequestLogForSelection() async {
         guard case let .provider(provider) = self.selection,
               provider == .opencode || provider == .opencodego
@@ -857,7 +859,7 @@ extension UsageDashboardView {
     // MARK: Selection helpers
 
     private var dashboardProviders: [UsageProvider] {
-        self.store.enabledProviders()
+        self.store.enabledProviders().compactMap(\.firstPartyProvider)
     }
 
     private var selectionColor: Color {
@@ -878,8 +880,9 @@ extension UsageDashboardView {
         guard case let .provider(provider) = self.selection else { return nil }
         let plan = UsageMenuCardView.Model.plan(
             for: provider,
-            snapshot: self.store.snapshot(for: provider),
+            snapshot: self.store.snapshot(for: provider.instanceID),
             account: self.store.accountInfo(for: provider),
+            override: nil,
             metadata: self.store.metadata(for: provider))
         guard let plan, !plan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
         return plan
@@ -893,7 +896,7 @@ extension UsageDashboardView {
             return String(format: L("Past year · %@ · %d active days"), total, data.activeDayCount)
         }
         if case let .provider(provider) = self.selection {
-            let email = self.store.snapshot(for: provider)?.identity?.accountEmail?
+            let email = self.store.snapshot(for: provider.instanceID)?.identity?.accountEmail?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if let email, !email.isEmpty { return email }
         }
@@ -1056,7 +1059,7 @@ extension UsageDashboardView {
         var sum: Double = 0
         var count = 0
         for provider in self.dashboardProviders {
-            guard let window = self.store.snapshot(for: provider)?.primary else { continue }
+            guard let window = self.store.snapshot(for: provider.instanceID)?.primary else { continue }
             sum += min(100, max(0, window.usedPercent))
             count += 1
         }
@@ -1085,7 +1088,7 @@ extension UsageDashboardView {
                 return UsageFormatter.tokenCountString(entry.totalTokens ?? 0)
             }
         }
-        if let window = self.store.snapshot(for: provider)?.primary {
+        if let window = self.store.snapshot(for: provider.instanceID)?.primary {
             return String(format: "%.0f%%", min(100, max(0, window.usedPercent)))
         }
         return "—"
@@ -1095,7 +1098,7 @@ extension UsageDashboardView {
     /// provider has no primary window at all (e.g. an unconfigured
     /// OpenCode).
     private func percentValue(for provider: UsageProvider) -> String {
-        guard let window = self.store.snapshot(for: provider)?.primary else { return "—" }
+        guard let window = self.store.snapshot(for: provider.instanceID)?.primary else { return "—" }
         return String(format: "%.0f%%", min(100, max(0, window.usedPercent)))
     }
 

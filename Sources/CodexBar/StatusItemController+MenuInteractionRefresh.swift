@@ -84,14 +84,15 @@ extension StatusItemController {
 
     func deferMenuInteractionRefreshIfNeeded(providers: [UsageProvider]) {
         guard !self.store.isRefreshing else { return }
-        self.deferredMenuInteractionRefreshProviders.formUnion(providers)
+        self.deferredMenuInteractionRefreshProviders.formUnion(providers.map(\.instanceID))
     }
 
-    func clearSatisfiedDeferredMenuInteractionRefreshes(for providers: [UsageProvider]) {
-        for provider in providers
-            where !self.store.isStale(provider: provider) && self.store.snapshot(for: provider) != nil
-        {
-            self.deferredMenuInteractionRefreshProviders.remove(provider)
+    func clearSatisfiedDeferredMenuInteractionRefreshes(for providers: [ProviderInstanceID]) {
+        for instanceID in providers {
+            guard let provider = instanceID.firstPartyProvider,
+                  !self.store.needsUsageRefreshRetry(for: provider)
+            else { continue }
+            self.deferredMenuInteractionRefreshProviders.remove(instanceID)
         }
     }
 
@@ -128,7 +129,10 @@ extension StatusItemController {
             let hasProviderRefreshInFlight = pendingProviders.contains {
                 self.store.refreshingProviders.contains($0)
             }
-            guard !self.store.isRefreshing, !hasProviderRefreshInFlight else {
+            guard !self.store.isRefreshing,
+                  !self.store.hasForcedRefreshEnrichmentInFlight,
+                  !hasProviderRefreshInFlight
+            else {
                 self.deferredMenuInteractionRefreshTask = nil
                 self.scheduleDeferredMenuInteractionRefreshIfNeeded(
                     delay: Self.defaultDeferredMenuInteractionRefreshDelay)

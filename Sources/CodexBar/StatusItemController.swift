@@ -10,6 +10,10 @@ protocol StatusItemControlling: AnyObject {
     func openMenuFromShortcut()
     func runLoginFlowFromSettings(provider: UsageProvider) async
     func celebrationOriginPoint(for provider: UsageProvider?) -> CGPoint?
+    func trimRebuildableCachesForMemoryPressure() -> MemoryPressureCacheTrimSummary
+    #if DEBUG
+    func seedRebuildableCachesForMemoryPressureProof()
+    #endif
     func prepareForAppShutdown()
 }
 
@@ -18,7 +22,19 @@ extension StatusItemControlling {
         nil
     }
 
+    func trimRebuildableCachesForMemoryPressure() -> MemoryPressureCacheTrimSummary {
+        MemoryPressureCacheTrimSummary()
+    }
+
+    #if DEBUG
+    func seedRebuildableCachesForMemoryPressureProof() {}
+    #endif
+
     func prepareForAppShutdown() {}
+}
+
+struct NativeHighlightDeferredMenuRebuild {
+    let provider: UsageProvider?
 }
 
 @MainActor
@@ -29,12 +45,13 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     private(set) static var menuRefreshEnabled = !SettingsStore.isRunningTests
     static let quotaWarningFlashDuration: TimeInterval = 60
     private nonisolated static let statusItemAccessibilityTitle = "CodexBar"
+    private nonisolated static let debugStatusItemAccessibilityTitle = "CodexBar Debug"
     private nonisolated static let statusItemAccessibilityIdentifierPrefix = "CodexBar.StatusItem"
     private nonisolated static let mergedLegacyDefaultItemIndex = 0
 
     enum StatusItemIdentity {
         case merged
-        case provider(UsageProvider)
+        case provider(ProviderInstanceID)
 
         var autosaveName: String {
             switch self {
@@ -53,6 +70,14 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
                 "\(StatusItemController.statusItemAccessibilityIdentifierPrefix).\(provider.rawValue)"
             }
         }
+    }
+
+    nonisolated static func isDebugApp(bundleIdentifier: String?) -> Bool {
+        bundleIdentifier?.contains(".debug") == true
+    }
+
+    nonisolated static func statusItemAccessibilityTitle(isDebugApp: Bool) -> String {
+        isDebugApp ? self.debugStatusItemAccessibilityTitle : self.statusItemAccessibilityTitle
     }
 
     #if DEBUG
@@ -96,9 +121,16 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
 
     let store: UsageStore
     let settings: SettingsStore
-    lazy var menuCardRefreshMonitor = MenuCardRefreshMonitor { [weak self] provider in
-        self?.menuCardModel(for: provider)
+    var cloudSyncState: CloudSyncState {
+        didSet {
+            guard oldValue !== self.cloudSyncState else { return }
+            self.observeCloudSyncChanges()
+            self.invalidateMenus(refreshOpenMenus: true)
+        }
     }
+
+    let agentSessions: AgentSessionsStore
+    lazy var menuCardRefreshMonitor = self.makeMenuCardRefreshMonitor()
 
     let account: AccountInfo
     let updater: UpdaterProviding
@@ -108,26 +140,30 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     let menuCardRenderingEnabledForController: Bool
     let menuRefreshEnabledForController: Bool
     var statusItem: NSStatusItem
-    var statusItems: [UsageProvider: NSStatusItem] = [:]
-    var lastMenuProvider: UsageProvider?
-    var menuProviders: [ObjectIdentifier: UsageProvider] = [:]
+    var statusItems: [ProviderInstanceID: NSStatusItem] = [:]
+    /// App intent survives Tahoe changing `NSStatusItem.isVisible` after Control Center rejects its scene.
+    var expectedVisibleStatusItemAutosaveNames: Set<String> = []
+    var lastMenuProvider: ProviderInstanceID?
+    var menuProviders: [ObjectIdentifier: ProviderInstanceID] = [:]
     var menuSession = MenuSessionCoordinator<ObjectIdentifier>()
     var menuReadinessSignatures: [ObjectIdentifier: String] = [:]
-    let hostedSubviewRenderSignatures = NSMapTable<NSMenu, NSString>.weakToStrongObjects()
-    /// Live persistent Refresh rows, tracked weakly so they can be given in-place in-flight
-    /// feedback (spinner) while the menu stays open, without rebuilding the menu.
-    let persistentRefreshRows = NSHashTable<PersistentMenuActionItemView>.weakObjects()
+    let hostedSubviewRenderSignatures = NSMapTable<NSMenu, HostedSubviewRenderSignatureBox>.weakToStrongObjects()
+    /// Persistent Refresh rows are weakly tracked so their enabled state can change during menu tracking.
+    let persistentRefreshItems = NSHashTable<NSMenuItem>.weakObjects()
     var menuCardHeightCache: [MenuCardHeightCacheKey: CGFloat] = [:]
     var measuredStandardMenuWidthCache: [String: CGFloat] = [:]
     var lastMenuAdjunctReadinessSignature = ""
     var lastMenuAdjunctReadinessBaselineVersion = 0
     var rootOpenHandledMenuObservationSignature: String?
     var mergedMenu: NSMenu?
-    var providerMenus: [UsageProvider: NSMenu] = [:]
+    var providerMenus: [ProviderInstanceID: NSMenu] = [:]
     var fallbackMenu: NSMenu?
     var openMenus: [ObjectIdentifier: NSMenu] = [:]
     var menuRefreshTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
-    var manualRefreshTask: Task<Void, Never>?
+    /// Manual refreshes tracked per scope so refreshing one provider neither greys out nor blocks
+    /// a manual refresh of another. `.global` covers the all-providers refresh (⌘R / merged overview).
+    var manualRefreshTasks: [ManualRefreshScope: Task<Void, Never>] = [:]
+
     var closedMenuRebuildTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
     var closedMenuRebuildRequests = MenuRebuildRequestRegistry<ObjectIdentifier>()
     var openMenuRebuildTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
@@ -135,7 +171,8 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var menuIdentitySignatures: [ObjectIdentifier: String] = [:]
     var codexAccountMenuProjectionRevalidationTask: Task<Void, Never>?
     var openMenuRebuildsClosingHostedSubviewMenus: Set<ObjectIdentifier> = []
-    var deferredMenuInteractionRefreshProviders: Set<UsageProvider> = []
+    var parentMenuRebuildPendingAfterHostedSubviewClose = false
+    var deferredMenuInteractionRefreshProviders: Set<ProviderInstanceID> = []
     var deferredMenuInteractionRefreshPending: Bool {
         !self.deferredMenuInteractionRefreshProviders.isEmpty
     }
@@ -143,6 +180,10 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var deferredOpenAIDashboardRefreshReason: String?
     var deferredMenuInteractionRefreshTask: Task<Void, Never>?
     var highlightedMenuItems: [ObjectIdentifier: NSMenuItem] = [:]
+    /// Open-menu rebuilds paused so AppKit's native selection background cannot retain stale geometry.
+    var nativeHighlightDeferredMenuRebuilds: [ObjectIdentifier: NativeHighlightDeferredMenuRebuild] = [:]
+    /// Baseline resync intent survives rebuild coalescing and any native-row or hosted-submenu deferral.
+    var pendingMenuBaselineResyncs: Set<ObjectIdentifier> = []
     var providerSwitcherShortcutEventMonitor: ProviderSwitcherShortcutEventMonitor?
     var providerSwitcherShortcutMenuID: ObjectIdentifier?
     var providerSwitcherPointerInteractionMenuID: ObjectIdentifier?
@@ -174,8 +215,8 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var _test_providerSwitcherMenuRebuildDebounceNanoseconds: UInt64?
     var _test_codexAmbientLoginRunnerOverride:
         (@MainActor (TimeInterval) async -> CodexLoginRunner.Result)?
-    var _test_manualRefreshOperation: (@MainActor () async -> Void)?
     #endif
+    var manualRefreshViewportRestoreState = ManualRefreshViewportRestoreState()
     var blinkTask: Task<Void, Never>?
     var menuBarCountdownRefreshTask: Task<Void, Never>?
     var loginTask: Task<Void, Never>? {
@@ -192,12 +233,12 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         }
     }
 
-    var blinkStates: [UsageProvider: BlinkState] = [:]
-    var blinkAmounts: [UsageProvider: CGFloat] = [:]
-    var wiggleAmounts: [UsageProvider: CGFloat] = [:]
-    var tiltAmounts: [UsageProvider: CGFloat] = [:]
-    var quotaWarningFlashUntil: [UsageProvider: Date] = [:]
-    var quotaWarningFlashTasks: [UsageProvider: Task<Void, Never>] = [:]
+    var blinkStates: [ProviderInstanceID: BlinkState] = [:]
+    var blinkAmounts: [ProviderInstanceID: CGFloat] = [:]
+    var wiggleAmounts: [ProviderInstanceID: CGFloat] = [:]
+    var tiltAmounts: [ProviderInstanceID: CGFloat] = [:]
+    var quotaWarningFlashUntil: [ProviderInstanceID: Date] = [:]
+    var quotaWarningFlashTasks: [ProviderInstanceID: Task<Void, Never>] = [:]
     var blinkForceUntil: Date?
     var loginPhase: LoginPhase = .idle {
         didSet {
@@ -213,10 +254,15 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var animationPattern: LoadingPattern = .knightRider
     var animationStartedAt: Date?
     private var lastConfigRevision: Int
-    private var lastProviderOrder: [UsageProvider]
+    private var lastProviderOrder: [ProviderInstanceID]
     private var lastMergeIcons: Bool
     private var lastSwitcherShowsIcons: Bool
     private var lastObservedUsageBarsShowUsed: Bool
+    var lastWidgetDisplaySettingsSignature = ""
+    var lastAgentSessionsEnabled: Bool
+    var lastAgentSessionsManualHosts: String
+    var lastAgentSessionsRefreshFrequency: RefreshFrequency
+    var lastAdaptiveActivityScanningEnabled: Bool
     /// Tracks which `usageBarsShowUsed` mode the provider switcher was built with.
     /// Used to decide whether we can "smart update" menu content without rebuilding the switcher.
     var lastSwitcherUsageBarsShowUsed: Bool
@@ -227,7 +273,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     /// Used to force menu rebuilds when app language changes.
     var lastMenuLocalizationSignature: String = ""
     /// Tracks which providers the merged menu's switcher was built with, to detect when it needs full rebuild.
-    var lastSwitcherProviders: [UsageProvider] = []
+    var lastSwitcherProviders: [ProviderInstanceID] = []
     /// Tracks which switcher tab state was used for the current merged-menu switcher instance.
     var lastMergedSwitcherSelection: ProviderSwitcherSelection?
     /// Tracks which provider/overview content is currently attached below the merged-menu switcher.
@@ -236,6 +282,13 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var lastCodexAccountMenuDisplay: CodexAccountMenuDisplay?
     /// Tracks the visible token account switcher contents for merged-menu smart updates.
     var lastTokenAccountMenuDisplay: TokenAccountMenuDisplay?
+    /// Debounced pre-build of sibling switcher tabs for flicker-free tab switches.
+    /// A common-modes Timer (not a Task) so it fires during NSMenu tracking.
+    var mergedSwitcherWarmupTimer: Timer?
+    /// Compact multi-account layout: accounts the user expanded to full cards this menu session.
+    var compactAccountExpandedIDs: Set<ProviderAccountIdentity> = []
+    /// Compact multi-account layout: providers whose collapsed healthy tail is revealed this menu session.
+    var compactAccountExpandedHealthyTailProviders: Set<ProviderInstanceID> = []
     /// Keeps detached merged-menu tab content reusable while the same menu remains open.
     var mergedSwitcherContentCaches: [ObjectIdentifier: [ProviderSwitcherSelection: CachedMergedSwitcherMenuContent]]
         = [:]
@@ -249,7 +302,8 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var providerSelectionUIRefreshTask: Task<Void, Never>?
     var deferredMergedIconRenderAfterTracking = false
     var lastAppliedMergedIconRenderSignature: String?
-    var lastAppliedProviderIconRenderSignatures: [UsageProvider: String] = [:]
+    var lastAppliedProviderIconRenderSignatures: [ProviderInstanceID: String] = [:]
+    let menuBarLayoutRenderer = MenuBarLayoutRenderer()
     var lastObservedStoreIconWorkSignature: String?
     var iconPerfRefreshCycleMetrics: IconPerfRefreshCycleMetrics?
     var iconPerfUpdatePassActive = false
@@ -258,16 +312,12 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
     var screenChangeVisibilityTask: Task<Void, Never>?
     let loginLogger = CodexBarLog.logger(LogCategories.login)
     let menuLogger = CodexBarLog.logger(LogCategories.app)
-    var selectedMenuProvider: UsageProvider? {
-        get { self.settings.selectedMenuProvider }
-        set { self.settings.selectedMenuProvider = newValue }
-    }
-
-    private static func makeStatusItem(
+    static func makeStatusItem(
         statusBar: NSStatusBar,
         identity: StatusItemIdentity,
         defaults: UserDefaults,
-        legacyDefaultItemIndex: Int?)
+        legacyDefaultItemIndex: Int?,
+        onCreated: ((NSStatusItem) -> Void)? = nil)
         -> NSStatusItem
     {
         MenuBarStatusItemPlacementPreflight.prepare(
@@ -275,13 +325,15 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
             autosaveName: identity.autosaveName,
             legacyDefaultItemIndex: legacyDefaultItemIndex)
         let item = statusBar.statusItem(withLength: NSStatusItem.variableLength)
+        onCreated?(item)
         item.autosaveName = identity.autosaveName
         if let button = item.button {
+            let title = self.statusItemAccessibilityTitle(
+                isDebugApp: self.isDebugApp(bundleIdentifier: Bundle.main.bundleIdentifier))
             // Ensure the icon is rendered at 1:1 without resampling (crisper edges for template images).
             button.imageScaling = .scaleNone
             button.setAccessibilityIdentifier(identity.accessibilityIdentifier)
-            button.setAccessibilityTitle(self.statusItemAccessibilityTitle)
-            button.toolTip = self.statusItemAccessibilityTitle
+            button.setAccessibilityTitle(title)
         }
         return item
     }
@@ -309,54 +361,22 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         case waitingBrowser
     }
 
-    func menuBarMetricWindow(for provider: UsageProvider, snapshot: UsageSnapshot?) -> RateWindow? {
+    func menuBarMetricWindow(for provider: UsageProvider, snapshot: UsageSnapshot?, now: Date = Date()) -> RateWindow? {
         if provider == .codex {
-            return self.codexMenuBarMetricWindow(snapshot: snapshot)
+            return self.codexMenuBarMetricWindow(snapshot: snapshot, now: now)
         }
         return MenuBarMetricWindowResolver.rateWindow(
             preference: self.settings.menuBarMetricPreference(for: provider, snapshot: snapshot),
             provider: provider,
             snapshot: snapshot,
-            supportsAverage: self.settings.menuBarMetricSupportsAverage(for: provider))
+            supportsAverage: self.settings.menuBarMetricSupportsAverage(for: provider),
+            antigravityPrioritizeExhaustedQuotas: self.settings.antigravityPrioritizeExhaustedQuotas,
+            now: now)
     }
 
-    private func codexMenuBarMetricWindow(snapshot: UsageSnapshot?) -> RateWindow? {
+    private func codexMenuBarMetricWindow(snapshot: UsageSnapshot?, now: Date) -> RateWindow? {
         guard let snapshot else { return nil }
-        let projection = CodexConsumerProjection.make(
-            surface: .menuBar,
-            context: CodexConsumerProjection.Context(
-                snapshot: snapshot,
-                rawUsageError: nil,
-                liveCredits: self.store.credits,
-                rawCreditsError: self.store.lastCreditsError,
-                liveDashboard: self.store.openAIDashboard,
-                rawDashboardError: self.store.lastOpenAIDashboardError,
-                dashboardAttachmentAuthorized: self.store.openAIDashboardAttachmentAuthorized,
-                dashboardRequiresLogin: self.store.openAIDashboardRequiresLogin,
-                now: snapshot.updatedAt))
-        let lanes = projection.visibleRateLanes
-        let first = lanes.first.flatMap { projection.rateWindow(for: $0) }
-        let second = lanes.dropFirst().first.flatMap { projection.rateWindow(for: $0) }
-        let preference = self.settings.menuBarMetricPreference(for: .codex, snapshot: snapshot)
-
-        switch preference {
-        case .secondary, .tertiary:
-            return second ?? first
-        case .extraUsage:
-            return first
-        case .average:
-            guard self.settings.menuBarMetricSupportsAverage(for: .codex),
-                  let primary = first,
-                  let secondary = second
-            else {
-                return first
-            }
-            let usedPercent = (primary.usedPercent + secondary.usedPercent) / 2
-            return RateWindow(
-                usedPercent: usedPercent, windowMinutes: nil, resetsAt: nil, resetDescription: nil)
-        case .automatic, .primary:
-            return first
-        }
+        return self.store.codexMenuBarMetricWindow(snapshot: snapshot, now: now)
     }
 
     init(
@@ -371,13 +391,16 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         statusBar: NSStatusBar = .system,
         menuCardRenderingEnabled: Bool = StatusItemController.menuCardRenderingEnabled,
         menuRefreshEnabled: Bool = StatusItemController.menuRefreshEnabled,
-        observeProviderConfigNotifications: Bool = !SettingsStore.isRunningTests)
+        observeProviderConfigNotifications: Bool = !SettingsStore.isRunningTests,
+        cloudSyncState: CloudSyncState = CloudSyncState())
     {
         if SettingsStore.isRunningTests {
             _ = NSApplication.shared
         }
         self.store = store
         self.settings = settings
+        self.cloudSyncState = cloudSyncState
+        self.agentSessions = AgentSessionsStore(settings: settings)
         self.account = account
         self.updater = updater
         self.preferencesSelection = preferencesSelection
@@ -393,6 +416,10 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         self.lastMergeIcons = settings.mergeIcons
         self.lastSwitcherShowsIcons = settings.switcherShowsIcons
         self.lastObservedUsageBarsShowUsed = settings.usageBarsShowUsed
+        self.lastAgentSessionsEnabled = settings.agentSessionsEnabled
+        self.lastAgentSessionsManualHosts = settings.agentSessionsManualHosts
+        self.lastAgentSessionsRefreshFrequency = settings.refreshFrequency
+        self.lastAdaptiveActivityScanningEnabled = settings.adaptiveActivityScanningEnabled
         self.lastSwitcherUsageBarsShowUsed = settings.usageBarsShowUsed
         self.menuCardRenderingEnabledForController = menuCardRenderingEnabled
         self.menuRefreshEnabledForController = menuRefreshEnabled
@@ -414,11 +441,16 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         }
         self.lastMenuAdjunctReadinessSignature = self.menuAdjunctReadinessSignature()
         self.lastMenuAdjunctReadinessBaselineVersion = self.menuSession.contentVersion
+        self.lastWidgetDisplaySettingsSignature = self.widgetDisplaySettingsSignature()
         self.wireBindings()
+        self.wireAgentSessionUpdates()
+        if !SettingsStore.isRunningTests {
+            self.agentSessions.start()
+        }
         self.updateVisibility()
         self.updateIcons()
         self.scheduleCodexAccountMenuProjectionRevalidationIfNeeded(
-            for: self.store.enabledProvidersForDisplay())
+            for: self.store.enabledFirstPartyProvidersForDisplay())
         self.scheduleStartupStatusItemVisibilityCheck()
         NotificationCenter.default.addObserver(
             self,
@@ -447,6 +479,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
             selector: #selector(self.handleScreenParametersDidChange(_:)),
             name: NSApplication.didChangeScreenParametersNotification,
             object: nil)
+        self.observeMenuBarTimeEnvironmentChanges()
     }
 
     convenience init(
@@ -482,6 +515,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         self.observeSettingsChanges()
         self.observeUpdaterChanges()
         self.observeManagedCodexCoordinatorChanges()
+        self.observeCloudSyncChanges()
     }
 
     private func observeStoreChanges() {
@@ -497,9 +531,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
 
     func handleObservedStoreMenuChange() {
         self.observeStoreChanges()
-        // In-place spinner sync for the persistent Refresh rows. Safe during menu tracking:
-        // it mutates existing row views only and never rebuilds the menu.
-        self.updatePersistentRefreshRowsInProgress()
+        self.updatePersistentRefreshItemsEnabled()
         let rootOpenHandledReadiness = self.consumeRootOpenHandledMenuObservationIfNeeded()
         // `refreshOpenMenus` is only consulted when a menu is currently open.
         // Computing the readiness signature serializes every enabled provider's
@@ -512,6 +544,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
             refreshOpenMenus: refreshOpenMenus,
             deferOpenParentMenuRebuild: true,
             allowStaleContentDuringDataRefresh: true)
+        self.completeParentMenuRebuildAfterHostedSubviewCloseIfNeeded()
     }
 
     private func observeStoreIconChanges() {
@@ -523,8 +556,9 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
                 self.observeStoreIconChanges()
                 let signature = self.storeIconObservationSignature()
                 guard signature != self.lastObservedStoreIconWorkSignature else { return }
-                self.lastObservedStoreIconWorkSignature = signature
-                self.updateIcons()
+                // Reuse the signature we just computed for the change check; `updateIcons` would
+                // otherwise recompute the identical value on the same main-actor turn.
+                self.updateIcons(precomputedStoreIconSignature: signature)
             }
         }
     }
@@ -563,13 +597,19 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         guard !self.isReleasedForTesting else { return }
         #endif
         let reason = notification.userInfo?["reason"] as? String ?? "unknown"
+        let affectsBackgroundWork = notification.userInfo?["affectsBackgroundWork"] as? Bool
         if let source = notification.object as? SettingsStore,
            source !== self.settings
         {
             if let config = notification.userInfo?["config"] as? CodexBarConfig {
-                self.settings.applyExternalConfig(config, reason: "external-\(reason)")
+                self.settings.applyExternalConfig(
+                    config,
+                    reason: "external-\(reason)",
+                    affectsBackgroundWork: affectsBackgroundWork)
             } else {
-                self.settings.reloadConfig(reason: "external-\(reason)")
+                self.settings.reloadConfig(
+                    reason: "external-\(reason)",
+                    affectsBackgroundWork: affectsBackgroundWork)
             }
         }
         self.handleProviderConfigChange(reason: "notification:\(reason)")
@@ -646,6 +686,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         #if DEBUG
         guard !self.isReleasedForTesting else { return }
         #endif
+        self.synchronizeAgentSessionsForSettingsChange()
         let configChanged = self.settings.configRevision != self.lastConfigRevision
         let orderChanged = self.settings.providerOrder != self.lastProviderOrder
         let localizationChanged = self.menuLocalizationSignature() != self.lastMenuLocalizationSignature
@@ -656,19 +697,26 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         }
         self.updateVisibility()
         self.updateIcons()
+        self.persistWidgetSnapshotIfWidgetDisplaySettingsChanged()
         if shouldRefreshOpenMenus {
             self.refreshOpenMenusAllowingParentRebuild(
                 deferParentRebuildDuringTracking: !localizationChanged)
         }
     }
 
-    func updateIcons() {
+    /// Updates the menu bar icons.
+    ///
+    /// The store-icon observer already computes `storeIconObservationSignature()` to decide whether any
+    /// icon work is needed, so it passes that value in via `precomputedStoreIconSignature` to avoid
+    /// recomputing the identical signature on the same main-actor turn. Other callers omit it and let the
+    /// signature refresh here, keeping `lastObservedStoreIconWorkSignature` current as the change gate.
+    func updateIcons(precomputedStoreIconSignature: String? = nil) {
         #if DEBUG
         guard !self.isReleasedForTesting else { return }
         #endif
         MainThreadActivityBreadcrumb.push("updateIcons")
         self.scheduleMenuBarCountdownRefreshIfNeeded()
-        self.lastObservedStoreIconWorkSignature = self.storeIconObservationSignature()
+        self.lastObservedStoreIconWorkSignature = precomputedStoreIconSignature ?? self.storeIconObservationSignature()
         self.beginIconPerfUpdatePass()
         defer {
             self.endIconPerfUpdatePass()
@@ -704,20 +752,6 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         return self.openMenus[ObjectIdentifier(mergedMenu)] != nil
     }
 
-    /// Lazily retrieves or creates a status item for the given provider
-    func lazyStatusItem(for provider: UsageProvider) -> NSStatusItem {
-        if let existing = self.statusItems[provider] {
-            return existing
-        }
-        let item = Self.makeStatusItem(
-            statusBar: self.statusBar,
-            identity: .provider(provider),
-            defaults: self.settings.userDefaults,
-            legacyDefaultItemIndex: self.legacyDefaultItemIndex(forNewProvider: provider))
-        self.statusItems[provider] = item
-        return item
-    }
-
     func recreateStatusItemsForVisibilityRecovery() {
         #if DEBUG
         guard !self.isReleasedForTesting else { return }
@@ -745,8 +779,13 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         let anyEnabled = !self.store.enabledProvidersForDisplay().isEmpty
         let force = self.store.debugForceAnimation
         let mergeIcons = self.shouldMergeIcons
+        var expectedVisibleAutosaveNames: Set<String> = []
         if mergeIcons {
-            self.statusItem.isVisible = anyEnabled || force
+            let shouldBeVisible = anyEnabled || force
+            self.statusItem.isVisible = shouldBeVisible
+            if shouldBeVisible {
+                expectedVisibleAutosaveNames.insert(self.statusItem.autosaveName)
+            }
             for provider in Array(self.statusItems.keys) {
                 self.removeProviderStatusItem(for: provider)
             }
@@ -754,26 +793,22 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         } else {
             self.statusItem.isVisible = false
             let fallback = self.fallbackProvider
-            for provider in self.settings.orderedProviders() {
+            for provider in self.settings.orderedFirstPartyProviders() {
                 let isEnabled = self.isEnabled(provider)
                 let shouldBeVisible = isEnabled || fallback == provider || force
                 if shouldBeVisible {
                     let item = self.lazyStatusItem(for: provider)
                     item.isVisible = true
+                    expectedVisibleAutosaveNames.insert(item.autosaveName)
                 } else {
                     self.removeProviderStatusItem(for: provider)
                 }
             }
             self.attachMenus(fallback: fallback)
         }
+        self.expectedVisibleStatusItemAutosaveNames = expectedVisibleAutosaveNames
         self.updateAnimationState()
         self.updateBlinkingState()
-    }
-
-    var fallbackProvider: UsageProvider? {
-        // Intentionally uses availability-filtered list: fallback activates when no provider
-        // can actually work, ensuring at least a codex icon is always visible.
-        self.store.enabledProviders().isEmpty ? .codex : nil
     }
 
     func isEnabled(_ provider: UsageProvider) -> Bool {
@@ -812,10 +847,10 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
                 let item = self.lazyStatusItem(for: provider)
 
                 if self.isEnabled(provider) {
-                    if self.providerMenus[provider] == nil {
-                        self.providerMenus[provider] = self.makeMenu(for: provider)
+                    if self.providerMenus[provider.instanceID] == nil {
+                        self.providerMenus[provider.instanceID] = self.makeMenu(for: provider)
                     }
-                    let menu = self.providerMenus[provider]
+                    let menu = self.providerMenus[provider.instanceID]
                     if item.menu !== menu {
                         item.menu = menu
                     }
@@ -827,7 +862,7 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
                         item.menu = self.fallbackMenu
                     }
                 }
-            } else if let item = self.statusItems[provider] {
+            } else if let item = self.statusItems[provider.instanceID] {
                 item.menu = nil
             }
         }
@@ -847,13 +882,20 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         guard !self.shouldMergeIcons else { return }
         let fallback = self.fallbackProvider
         let force = self.store.debugForceAnimation
-        for provider in ordered where self.isEnabled(provider) || fallback == provider || force {
+        for instanceID in ordered {
+            guard let provider = instanceID.firstPartyProvider,
+                  self.isEnabled(provider) || fallback == provider || force
+            else { continue }
             _ = self.lazyStatusItem(for: provider)
         }
     }
 
     private func removeProviderStatusItem(for provider: UsageProvider) {
-        if let menu = self.providerMenus.removeValue(forKey: provider) {
+        self.removeProviderStatusItem(for: provider.instanceID)
+    }
+
+    private func removeProviderStatusItem(for instanceID: ProviderInstanceID) {
+        if let menu = self.providerMenus.removeValue(forKey: instanceID) {
             let menuID = ObjectIdentifier(menu)
             if menuID == self.providerSwitcherShortcutMenuID {
                 self.removeProviderSwitcherShortcutMonitor()
@@ -862,9 +904,9 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
             self.removeMenuLifecycleState(menuID)
         }
 
-        guard let item = self.statusItems.removeValue(forKey: provider) else { return }
+        guard let item = self.statusItems.removeValue(forKey: instanceID) else { return }
         item.menu = nil
-        self.lastAppliedProviderIconRenderSignatures.removeValue(forKey: provider)
+        self.lastAppliedProviderIconRenderSignatures.removeValue(forKey: instanceID)
         self.statusBar.removeStatusItem(item)
     }
 
@@ -883,8 +925,8 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
         let base: String
         switch self.loginPhase {
         case .idle: return nil
-        case .requesting: base = "Requesting login…"
-        case .waitingBrowser: base = "Waiting in browser…"
+        case .requesting: base = L("Requesting login…")
+        case .waitingBrowser: base = L("Waiting in browser…")
         }
         let prefix = ProviderDescriptorRegistry.descriptor(for: provider).metadata.displayName
         return "\(prefix): \(base)"
@@ -906,6 +948,21 @@ final class StatusItemController: NSObject, NSMenuDelegate, StatusItemControllin
 
 #if DEBUG
 extension StatusItemController {
+    var _test_manualRefreshOperation: (@MainActor () async -> Void)? {
+        get { self.manualRefreshViewportRestoreState.testOperation }
+        set { self.manualRefreshViewportRestoreState.testOperation = newValue }
+    }
+
+    var _test_menuViewportRestoreObserver: (@MainActor (NSMenu) -> Void)? {
+        get { self.manualRefreshViewportRestoreState.testObserver }
+        set { self.manualRefreshViewportRestoreState.testObserver = newValue }
+    }
+
+    var _test_menuViewportRestoreScheduler: ((@escaping @MainActor () -> Void) -> Void)? {
+        get { self.manualRefreshViewportRestoreState.testScheduler }
+        set { self.manualRefreshViewportRestoreState.testScheduler = newValue }
+    }
+
     var menuContentVersion: Int {
         get { self.menuSession.contentVersion }
         set { self.menuSession.replaceContentVersionForTesting(newValue) }
@@ -956,8 +1013,8 @@ extension StatusItemController {
 #endif
 
 extension StatusItemController {
-    private func legacyDefaultItemIndex(forNewProvider provider: UsageProvider) -> Int? {
-        let visibleProviders = self.settings.orderedProviders().filter { self.isVisible($0) }
+    func legacyDefaultItemIndex(forNewProvider provider: UsageProvider) -> Int? {
+        let visibleProviders = self.settings.orderedFirstPartyProviders().filter { self.isVisible($0) }
         guard let providerOffset = visibleProviders.firstIndex(of: provider) else { return nil }
         return Self.mergedLegacyDefaultItemIndex + 1 + providerOffset
     }

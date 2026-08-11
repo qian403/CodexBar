@@ -19,7 +19,7 @@ struct CustomProviderImplementation: ProviderImplementation {
 
     @MainActor
     func isAvailable(context: ProviderAvailabilityContext) -> Bool {
-        ProviderTokenResolver.customToken(for: self.id, environment: context.environment) != nil &&
+        ProviderTokenResolver.token(for: self.id, environment: context.environment) != nil &&
             CustomSettingsReader.baseURL(for: self.id, environment: context.environment) != nil
     }
 

@@ -22,15 +22,20 @@ extension StatusItemController {
     }
 
     private func cancelShutdownTasks() {
+        self.agentSessions.stop()
         self.blinkTask?.cancel()
         self.blinkTask = nil
         self.menuBarCountdownRefreshTask?.cancel()
         self.menuBarCountdownRefreshTask = nil
         self.loginTask?.cancel()
         self.loginTask = nil
-        self.manualRefreshTask?.cancel()
-        self.manualRefreshTask = nil
-        self.menuCardRefreshMonitor.isManualRefreshInFlight = false
+        for task in self.manualRefreshTasks.values {
+            task.cancel()
+        }
+        self.manualRefreshTasks.removeAll()
+        self.store.cancelForcedRefreshEnrichment()
+        self.store.cancelRequiredRefresh()
+        self.menuCardRefreshMonitor.resetManualRefresh()
         self.screenChangeVisibilityTask?.cancel()
         self.screenChangeVisibilityTask = nil
         self.pendingScreenChangePreviousCount = nil
@@ -75,8 +80,12 @@ extension StatusItemController {
         self.openMenuRebuildRequests.cancelAll()
         self.openMenuRebuildsClosingHostedSubviewMenus.removeAll(keepingCapacity: false)
         self.menuSession.clearMenuTracking()
+        self.manualRefreshViewportRestoreState.deferredUntilRebuild.removeAll(keepingCapacity: false)
+        self.manualRefreshViewportRestoreState.stopAllMovementTracking()
         self.openMenus.removeAll(keepingCapacity: false)
         self.highlightedMenuItems.removeAll(keepingCapacity: false)
+        self.nativeHighlightDeferredMenuRebuilds.removeAll(keepingCapacity: false)
+        self.pendingMenuBaselineResyncs.removeAll(keepingCapacity: false)
         self.menuCardHeightCache.removeAll(keepingCapacity: false)
         self.measuredStandardMenuWidthCache.removeAll(keepingCapacity: false)
         self.mergedSwitcherContentCaches.removeAll(keepingCapacity: false)

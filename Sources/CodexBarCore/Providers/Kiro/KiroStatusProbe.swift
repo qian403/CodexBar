@@ -1,8 +1,10 @@
 import Foundation
 #if canImport(Darwin)
 import Darwin
-#else
+#elseif canImport(Glibc)
 import Glibc
+#elseif canImport(Musl)
+import Musl
 #endif
 
 public struct KiroUsageSnapshot: Sendable {
@@ -92,29 +94,62 @@ public struct KiroUsageSnapshot: Sendable {
             accountOrganization: nil,
             loginMethod: self.authMethod)
 
-        let kiroUsage = KiroUsageDetails(
-            planName: self.planName,
-            displayPlanName: self.displayPlanName,
-            creditsUsed: self.creditsUsed,
-            creditsTotal: self.creditsTotal,
-            creditsRemaining: self.creditsRemaining,
-            bonusCreditsUsed: self.bonusCreditsUsed,
-            bonusCreditsTotal: self.bonusCreditsTotal,
-            bonusCreditsRemaining: self.bonusCreditsRemaining,
-            bonusExpiryDays: self.bonusExpiryDays,
-            overagesStatus: self.overagesStatus,
-            overageCreditsUsed: self.overageCreditsUsed,
-            estimatedOverageCostUSD: self.estimatedOverageCostUSD,
-            manageURL: self.manageURL,
-            contextUsage: self.contextUsage)
+        var detailRows: [ProviderDetailSection.Row] = [
+            .makeRow(label: "Plan", value: self.displayPlanName),
+            .makeRow(label: "Credits left", value: UsageFormatter.kiroCreditNumber(self.creditsRemaining)),
+            .makeRow(label: "Credits used", value: UsageFormatter.kiroCreditNumber(self.creditsUsed)),
+            .makeRow(label: "Credits total", value: UsageFormatter.kiroCreditNumber(self.creditsTotal)),
+        ]
+        if let remaining = self.bonusCreditsRemaining, let total = self.bonusCreditsTotal {
+            detailRows.append(.makeRow(
+                label: "Bonus credits left",
+                value: UsageFormatter.kiroCreditNumber(remaining),
+                secondaryValue: [
+                    "of \(UsageFormatter.kiroCreditNumber(total))",
+                    self.bonusExpiryDays.map { "expires in \($0)d" },
+                ].compactMap(\.self).joined(separator: " · ")))
+        }
+        if let overagesStatus = self.overagesStatus {
+            detailRows.append(.makeRow(label: "Overages", value: overagesStatus))
+        }
+        let overagesEnabled = self.overagesStatus?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .hasPrefix("enabled") == true
+        if overagesEnabled, let overageCreditsUsed = self.overageCreditsUsed {
+            detailRows.append(.makeRow(
+                label: "Overage usage",
+                value: "\(UsageFormatter.kiroCreditNumber(overageCreditsUsed)) credits"))
+        }
+        if overagesEnabled, let estimatedOverageCostUSD = self.estimatedOverageCostUSD {
+            detailRows.append(.makeRow(
+                label: "Overage cost",
+                value: UsageFormatter.usdString(estimatedOverageCostUSD)))
+        }
+        if let contextUsage = self.contextUsage {
+            detailRows.append(.makeRow(
+                label: "Context used",
+                value: String(format: "%.1f%%", contextUsage.totalPercentUsed)))
+            let contextParts: [(String, Double?)] = [
+                ("Context files", contextUsage.contextFilesPercent),
+                ("Tools", contextUsage.toolsPercent),
+                ("Kiro responses", contextUsage.kiroResponsesPercent),
+                ("Prompts", contextUsage.promptsPercent),
+            ]
+            detailRows.append(contentsOf: contextParts.compactMap { label, value in
+                value.map { .makeRow(label: label, value: String(format: "%.1f%%", $0)) }
+            })
+        }
+        if let manageURL = self.manageURL {
+            detailRows.append(.makeRow(label: "Manage", value: manageURL))
+        }
 
         return UsageSnapshot(
             primary: primary,
             secondary: secondary,
             tertiary: nil,
-            kiroUsage: kiroUsage,
             providerCost: nil,
-            zaiUsage: nil,
+            details: [.makeSection(title: "Usage", rows: detailRows)],
             updatedAt: self.updatedAt,
             identity: identity)
     }
@@ -151,55 +186,6 @@ public struct KiroContextUsageSnapshot: Codable, Equatable, Sendable {
     }
 }
 
-public struct KiroUsageDetails: Codable, Equatable, Sendable {
-    public let planName: String
-    public let displayPlanName: String
-    public let creditsUsed: Double
-    public let creditsTotal: Double
-    public let creditsRemaining: Double
-    public let bonusCreditsUsed: Double?
-    public let bonusCreditsTotal: Double?
-    public let bonusCreditsRemaining: Double?
-    public let bonusExpiryDays: Int?
-    public let overagesStatus: String?
-    public let overageCreditsUsed: Double?
-    public let estimatedOverageCostUSD: Double?
-    public let manageURL: String?
-    public let contextUsage: KiroContextUsageSnapshot?
-
-    public init(
-        planName: String,
-        displayPlanName: String,
-        creditsUsed: Double,
-        creditsTotal: Double,
-        creditsRemaining: Double,
-        bonusCreditsUsed: Double?,
-        bonusCreditsTotal: Double?,
-        bonusCreditsRemaining: Double?,
-        bonusExpiryDays: Int?,
-        overagesStatus: String?,
-        overageCreditsUsed: Double?,
-        estimatedOverageCostUSD: Double?,
-        manageURL: String?,
-        contextUsage: KiroContextUsageSnapshot?)
-    {
-        self.planName = planName
-        self.displayPlanName = displayPlanName
-        self.creditsUsed = creditsUsed
-        self.creditsTotal = creditsTotal
-        self.creditsRemaining = creditsRemaining
-        self.bonusCreditsUsed = bonusCreditsUsed
-        self.bonusCreditsTotal = bonusCreditsTotal
-        self.bonusCreditsRemaining = bonusCreditsRemaining
-        self.bonusExpiryDays = bonusExpiryDays
-        self.overagesStatus = overagesStatus
-        self.overageCreditsUsed = overageCreditsUsed
-        self.estimatedOverageCostUSD = estimatedOverageCostUSD
-        self.manageURL = manageURL
-        self.contextUsage = contextUsage
-    }
-}
-
 public enum KiroStatusProbeError: LocalizedError, Sendable {
     case cliNotFound
     case notLoggedIn
@@ -224,17 +210,60 @@ public enum KiroStatusProbeError: LocalizedError, Sendable {
 }
 
 public struct KiroStatusProbe: Sendable {
+    struct PipeProcessRegistry: Sendable {
+        let beginLaunch: @Sendable () -> Bool
+        let endLaunch: @Sendable () -> Void
+        let register: @Sendable (pid_t, String) -> Bool
+        let updateProcessGroup: @Sendable (pid_t, pid_t?) -> Void
+        let unregister: @Sendable (pid_t) -> Void
+
+        static let live = Self(
+            beginLaunch: { TTYCommandRunner.beginActiveProcessLaunchForAppShutdown() },
+            endLaunch: { TTYCommandRunner.endActiveProcessLaunchForAppShutdown() },
+            register: { pid, binary in
+                TTYCommandRunner.registerActiveProcessForAppShutdown(pid: pid, binary: binary)
+            },
+            updateProcessGroup: { pid, processGroup in
+                TTYCommandRunner.updateActiveProcessGroupForAppShutdown(pid: pid, processGroup: processGroup)
+            },
+            unregister: { pid in
+                TTYCommandRunner.unregisterActiveProcessForAppShutdown(pid: pid)
+            })
+    }
+
     private let cliBinaryResolver: @Sendable () -> String?
+    private let accountProbeTimeout: TimeInterval
+    private let usageProbeTimeout: TimeInterval
+    private let contextProbeTimeout: TimeInterval
+    private let pipeTimeoutCap: TimeInterval
+    private let pipeProcessRegistry: PipeProcessRegistry
 
     public init() {
         self.cliBinaryResolver = { TTYCommandRunner.which("kiro-cli") }
+        self.accountProbeTimeout = 3.0
+        self.usageProbeTimeout = 20.0
+        self.contextProbeTimeout = 8.0
+        self.pipeTimeoutCap = 5.0
+        self.pipeProcessRegistry = .live
     }
 
-    init(cliBinaryResolver: @escaping @Sendable () -> String?) {
+    init(
+        cliBinaryResolver: @escaping @Sendable () -> String?,
+        accountProbeTimeout: TimeInterval = 3.0,
+        usageProbeTimeout: TimeInterval = 20.0,
+        contextProbeTimeout: TimeInterval = 8.0,
+        pipeTimeoutCap: TimeInterval = 5.0,
+        pipeProcessRegistry: PipeProcessRegistry = .live)
+    {
         self.cliBinaryResolver = cliBinaryResolver
+        self.accountProbeTimeout = accountProbeTimeout
+        self.usageProbeTimeout = usageProbeTimeout
+        self.contextProbeTimeout = contextProbeTimeout
+        self.pipeTimeoutCap = pipeTimeoutCap
+        self.pipeProcessRegistry = pipeProcessRegistry
     }
 
-    private static let logger = CodexBarLog.logger(LogCategories.kiro)
+    private static let logger = CodexBarLog.logger(LogCategories.provider(.kiro))
 
     public static func detectVersion() -> String? {
         guard let path = TTYCommandRunner.which("kiro-cli"),
@@ -254,26 +283,44 @@ public struct KiroStatusProbe: Sendable {
     }
 
     public func fetch() async throws -> KiroUsageSnapshot {
-        let account = try await self.ensureLoggedIn()
-        let output = try await self.runUsageCommand()
+        let accountTask = Task { await self.fetchAccountStatus() }
+
+        let output: String
+        do {
+            output = try await self.runUsageCommand()
+        } catch is CancellationError {
+            accountTask.cancel()
+            _ = await accountTask.value
+            throw CancellationError()
+        } catch {
+            if try await self.awaitAccountStatus(accountTask) == .notLoggedIn {
+                throw KiroStatusProbeError.notLoggedIn
+            }
+            throw error
+        }
+
         var contextUsage: KiroContextUsageSnapshot?
         do {
             contextUsage = try await self.fetchContextUsage()
+        } catch is CancellationError {
+            accountTask.cancel()
+            _ = await accountTask.value
+            throw CancellationError()
         } catch {
             Self.logger.debug("Kiro context usage probe failed: \(error.localizedDescription)")
         }
-        return try self.parse(
-            output: output,
-            accountEmail: account.email,
-            authMethod: account.authMethod,
-            contextUsage: contextUsage)
-    }
 
-    struct KiroCLIResult {
-        let stdout: String
-        let stderr: String
-        let terminationStatus: Int32
-        let terminatedForIdle: Bool
+        let accountStatus = try await self.awaitAccountStatus(accountTask)
+        let accountInfo = accountStatus.account
+        do {
+            return try self.parse(
+                output: output,
+                accountEmail: accountInfo?.email,
+                authMethod: accountInfo?.authMethod,
+                contextUsage: contextUsage)
+        } catch KiroStatusProbeError.parseError where accountStatus == .notLoggedIn {
+            throw KiroStatusProbeError.notLoggedIn
+        }
     }
 
     struct KiroAccountInfo: Equatable {
@@ -281,8 +328,119 @@ public struct KiroStatusProbe: Sendable {
         let email: String?
     }
 
+    struct KiroCLIResult: Sendable {
+        let stdout: String
+        let stderr: String
+        let terminationStatus: Int32
+        let stoppedAfterOutput: Bool
+
+        var output: String {
+            let stdout = self.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+            let stderr = self.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+            return [stdout, stderr]
+                .filter { !$0.isEmpty }
+                .joined(separator: "\n")
+        }
+    }
+
+    private enum KiroCommandKind: String, Sendable {
+        case whoAmI = "whoami"
+        case usage
+        case context
+    }
+
+    private enum KiroTransportOutcome: Sendable {
+        case result(KiroCLIResult)
+        case failure(KiroStatusProbeError)
+        case cancelled
+    }
+
+    private enum KiroTransportEvent: Sendable {
+        case pipe(KiroTransportOutcome)
+        case pty(KiroTransportOutcome)
+        case fallbackReady
+    }
+
+    private final class KiroPipeActivityState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var lastActivity = ContinuousClock.now
+        private var receivedOutput = false
+
+        var lastActivityAt: ContinuousClock.Instant {
+            self.lock.withLock { self.lastActivity }
+        }
+
+        var hasReceivedOutput: Bool {
+            self.lock.withLock { self.receivedOutput }
+        }
+
+        func markActivity() {
+            self.lock.withLock {
+                self.lastActivity = .now
+                self.receivedOutput = true
+            }
+        }
+    }
+
+    private final class KiroTransportCancellationState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            self.lock.withLock { self.cancelled }
+        }
+
+        func cancel() {
+            self.lock.withLock { self.cancelled = true }
+        }
+    }
+
+    private enum KiroAccountProbeStatus: Equatable {
+        case account(KiroAccountInfo)
+        case notLoggedIn
+        case unavailable
+
+        var account: KiroAccountInfo? {
+            guard case let .account(info) = self else { return nil }
+            return info
+        }
+    }
+
+    private func fetchAccountStatus() async -> KiroAccountProbeStatus {
+        do {
+            return try await .account(self.ensureLoggedIn())
+        } catch KiroStatusProbeError.notLoggedIn {
+            return .notLoggedIn
+        } catch {
+            Self.logger.debug("Kiro account probe failed: \(error.localizedDescription)")
+            return .unavailable
+        }
+    }
+
+    private func awaitAccountStatus(
+        _ task: Task<KiroAccountProbeStatus, Never>) async throws -> KiroAccountProbeStatus
+    {
+        let status = await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        try Task.checkCancellation()
+        return status
+    }
+
     private func ensureLoggedIn() async throws -> KiroAccountInfo {
-        let result = try await self.runCommand(arguments: ["whoami"], timeout: 5.0)
+        let result = try await self.runCommand(
+            arguments: ["whoami"],
+            timeout: self.accountProbeTimeout,
+            idleTimeout: 1.5,
+            kind: .whoAmI)
+        if result.stoppedAfterOutput {
+            if Self.isLoginRequired(result.output) {
+                throw KiroStatusProbeError.notLoggedIn
+            }
+            throw KiroStatusProbeError.timeout
+        }
         return try self.validateWhoAmIOutput(
             stdout: result.stdout,
             stderr: result.stderr,
@@ -290,12 +448,13 @@ public struct KiroStatusProbe: Sendable {
     }
 
     func validateWhoAmIOutput(stdout: String, stderr: String, terminationStatus: Int32) throws -> KiroAccountInfo {
-        let trimmedStdout = stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedStderr = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        let combined = trimmedStderr.isEmpty ? trimmedStdout : trimmedStderr
-        let lowered = combined.lowercased()
+        let combined = KiroCLIResult(
+            stdout: stdout,
+            stderr: stderr,
+            terminationStatus: terminationStatus,
+            stoppedAfterOutput: false).output
 
-        if lowered.contains("not logged in") || lowered.contains("login required") {
+        if Self.isLoginRequired(combined) {
             throw KiroStatusProbeError.notLoggedIn
         }
 
@@ -311,6 +470,15 @@ public struct KiroStatusProbe: Sendable {
         }
 
         return self.parseWhoAmIOutput(combined)
+    }
+
+    private static func isLoginRequired(_ output: String) -> Bool {
+        let lowered = Self.stripANSI(output).lowercased()
+        return lowered.contains("not logged in")
+            || lowered.contains("login required")
+            || lowered.contains("failed to initialize auth portal")
+            || lowered.contains("kiro-cli login")
+            || lowered.contains("oauth error")
     }
 
     func parseWhoAmIOutput(_ output: String) -> KiroAccountInfo {
@@ -347,128 +515,112 @@ public struct KiroStatusProbe: Sendable {
     private func runUsageCommand() async throws -> String {
         let result = try await self.runCommand(
             arguments: ["chat", "--no-interactive", "/usage"],
-            timeout: 20.0,
-            idleTimeout: 10.0)
-        let trimmedStdout = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
-        let trimmedStderr = result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
-        let combinedOutput = trimmedStderr.isEmpty ? trimmedStdout : trimmedStderr
-        let combinedStripped = Self.stripANSI(combinedOutput).lowercased()
-
-        if combinedStripped.contains("not logged in")
-            || combinedStripped.contains("login required")
-            || combinedStripped.contains("failed to initialize auth portal")
-            || combinedStripped.contains("kiro-cli login")
-            || combinedStripped.contains("oauth error")
-        {
+            timeout: self.usageProbeTimeout,
+            idleTimeout: 4.0,
+            kind: .usage)
+        let output = result.output
+        if Self.isLoginRequired(output) {
             throw KiroStatusProbeError.notLoggedIn
         }
 
-        if result.terminatedForIdle, !Self.isUsageOutputComplete(combinedOutput) {
-            throw KiroStatusProbeError.timeout
-        }
-
-        if !trimmedStdout.isEmpty {
-            return result.stdout
-        }
-
-        if !trimmedStderr.isEmpty {
-            return result.stderr
-        }
-
-        if result.terminationStatus != 0 {
-            let message = combinedOutput.isEmpty
-                ? "Kiro CLI failed with status \(result.terminationStatus)."
-                : combinedOutput
-            throw KiroStatusProbeError.cliFailed(message)
-        }
-
-        return result.stdout
+        try Self.validateCommandCompletion(
+            result,
+            command: "usage",
+            allowIdleOutput: (try? self.parse(output: output)) != nil)
+        return output
     }
 
     private func fetchContextUsage() async throws -> KiroContextUsageSnapshot? {
         let result = try await self.runCommand(
             arguments: ["chat", "--no-interactive", "/context"],
-            timeout: 8.0,
-            idleTimeout: 3.0)
-        let output = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? result.stderr
-            : result.stdout
-        return self.parseContextUsage(output: output)
+            timeout: self.contextProbeTimeout,
+            idleTimeout: 3.0,
+            kind: .context)
+        let contextUsage = self.parseContextUsage(output: result.output)
+        try Self.validateCommandCompletion(
+            result,
+            command: "context",
+            allowIdleOutput: contextUsage != nil)
+        return contextUsage
     }
 
-    func runCommand(
+    private func runViaPipe(
         arguments: [String],
         timeout: TimeInterval,
-        idleTimeout: TimeInterval = 5.0) async throws -> KiroCLIResult
+        idleTimeout: TimeInterval,
+        activityState state: KiroPipeActivityState) async throws -> KiroCLIResult
     {
+        try Task.checkCancellation()
         guard let binary = self.cliBinaryResolver() else {
             throw KiroStatusProbeError.cliNotFound
         }
 
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: binary)
-        process.arguments = arguments
-
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
-        process.standardOutput = stdoutPipe
-        process.standardError = stderrPipe
-        process.standardInput = FileHandle.nullDevice
 
-        var env = ProcessInfo.processInfo.environment
+        var env = TTYCommandRunner.enrichedEnvironment()
         env["TERM"] = "xterm-256color"
-        process.environment = env
 
-        final class ActivityState: @unchecked Sendable {
-            private let lock = NSLock()
-            private var _lastActivityAt = Date()
-            private var _hasReceivedOutput = false
-
-            var lastActivityAt: Date {
-                self.lock.withLock { self._lastActivityAt }
-            }
-
-            var hasReceivedOutput: Bool {
-                self.lock.withLock { self._hasReceivedOutput }
-            }
-
-            func markActivity() {
-                self.lock.withLock {
-                    self._lastActivityAt = Date()
-                    self._hasReceivedOutput = true
-                }
+        guard self.pipeProcessRegistry.beginLaunch() else {
+            throw KiroStatusProbeError.cliFailed("App shutdown in progress")
+        }
+        var launchReservationHeld = true
+        defer {
+            if launchReservationHeld {
+                self.pipeProcessRegistry.endLaunch()
             }
         }
 
-        let state = ActivityState()
         let stdoutCapture = ProcessPipeCapture(pipe: stdoutPipe, onData: { state.markActivity() })
         let stderrCapture = ProcessPipeCapture(pipe: stderrPipe, onData: { state.markActivity() })
+        stdoutCapture.start()
+        stderrCapture.start()
 
+        let process: SpawnedProcessGroup
         do {
-            try process.run()
+            try Task.checkCancellation()
+            process = try SpawnedProcessGroup.launch(
+                binary: binary,
+                arguments: arguments,
+                environment: env,
+                stdoutPipe: stdoutPipe,
+                stderrPipe: stderrPipe)
         } catch {
             stdoutCapture.stop()
             stderrCapture.stop()
             throw error
         }
-        stdoutCapture.start()
-        stderrCapture.start()
-        let pid = process.processIdentifier
-        let processGroup: pid_t? = setpgid(pid, pid) == 0 ? pid : nil
 
-        let deadline = Date().addingTimeInterval(timeout)
+        guard self.pipeProcessRegistry.register(
+            process.pid,
+            URL(fileURLWithPath: binary).lastPathComponent)
+        else {
+            await Self.terminateCancelledPipeProcess(
+                process,
+                stdoutCapture: stdoutCapture,
+                stderrCapture: stderrCapture)
+            throw KiroStatusProbeError.cliFailed("App shutdown in progress")
+        }
+        self.pipeProcessRegistry.updateProcessGroup(process.pid, process.processGroup)
+        self.pipeProcessRegistry.endLaunch()
+        launchReservationHeld = false
+        defer { self.pipeProcessRegistry.unregister(process.pid) }
+
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(max(0, timeout)))
         var didHitDeadline = false
         var didTerminateForIdle = false
 
         do {
             while process.isRunning {
                 try Task.checkCancellation()
-                if Date() >= deadline {
+                let now = clock.now
+                if now >= deadline {
                     didHitDeadline = true
                     break
                 }
                 if state.hasReceivedOutput,
-                   Date().timeIntervalSince(state.lastActivityAt) >= idleTimeout
+                   state.lastActivityAt.duration(to: now) >= .seconds(max(0, idleTimeout))
                 {
                     didTerminateForIdle = true
                     break
@@ -476,42 +628,141 @@ public struct KiroStatusProbe: Sendable {
                 try await Task.sleep(for: .milliseconds(100))
             }
         } catch {
-            await Self.terminateProcess(process, processGroup: processGroup)
-            stdoutCapture.stop()
-            stderrCapture.stop()
+            await Self.terminateCancelledPipeProcess(
+                process,
+                stdoutCapture: stdoutCapture,
+                stderrCapture: stderrCapture)
             throw error
         }
 
         if process.isRunning {
-            await Self.terminateProcess(process, processGroup: processGroup)
+            await process.terminate()
             guard !process.isRunning else {
                 stdoutCapture.stop()
                 stderrCapture.stop()
                 throw KiroStatusProbeError.timeout
             }
-            if didHitDeadline || !state.hasReceivedOutput {
+            if !state.hasReceivedOutput {
                 stdoutCapture.stop()
                 stderrCapture.stop()
                 throw KiroStatusProbeError.timeout
             }
         }
+        await process.terminateResidualProcesses()
 
-        async let stdoutData = stdoutCapture.finish(timeout: .seconds(1))
-        async let stderrData = stderrCapture.finish(timeout: .seconds(1))
-        let output = await (stdout: stdoutData, stderr: stderrData)
+        async let stdoutDataTask = stdoutCapture.finish(timeout: .seconds(1))
+        async let stderrDataTask = stderrCapture.finish(timeout: .seconds(1))
+        let (stdoutData, stderrData) = await (stdoutDataTask, stderrDataTask)
+        if !stdoutCapture.reachedEOF || !stderrCapture.reachedEOF {
+            await process.terminateResidualProcesses()
+        }
+        await process.finish()
+        guard let terminationStatus = process.terminationStatus else {
+            throw KiroStatusProbeError.timeout
+        }
         return KiroCLIResult(
-            stdout: String(data: output.stdout, encoding: .utf8) ?? "",
-            stderr: String(data: output.stderr, encoding: .utf8) ?? "",
-            terminationStatus: process.terminationStatus,
-            terminatedForIdle: didTerminateForIdle)
+            stdout: ProcessPipeCapture.decodeUTF8(stdoutData),
+            stderr: ProcessPipeCapture.decodeUTF8(stderrData),
+            terminationStatus: terminationStatus,
+            stoppedAfterOutput: didTerminateForIdle || didHitDeadline)
     }
 
-    private static func terminateProcess(_ process: Process, processGroup: pid_t?) async {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                SubprocessRunner.terminateProcess(process, processGroup: processGroup)
-                continuation.resume()
+    private static func terminateCancelledPipeProcess(
+        _ process: SpawnedProcessGroup,
+        stdoutCapture: ProcessPipeCapture,
+        stderrCapture: ProcessPipeCapture) async
+    {
+        let cleanupTask = Task.detached(priority: .userInitiated) {
+            await process.terminate()
+            stdoutCapture.stop()
+            stderrCapture.stop()
+        }
+        await cleanupTask.value
+    }
+
+    private func runViaPTY(
+        arguments: [String],
+        timeout: TimeInterval,
+        idleTimeout: TimeInterval,
+        cancellationState: KiroTransportCancellationState) throws -> KiroCLIResult
+    {
+        guard let binary = self.cliBinaryResolver() else {
+            throw KiroStatusProbeError.cliNotFound
+        }
+        do {
+            let result = try TTYCommandRunner().run(
+                binary: binary,
+                send: "",
+                options: TTYCommandRunner.Options(
+                    rows: 50,
+                    cols: 200,
+                    timeout: timeout,
+                    idleTimeout: idleTimeout,
+                    extraArgs: arguments,
+                    returnOnEmptyProcessExit: true,
+                    cancellationCheck: {
+                        cancellationState.isCancelled || Task<Never, Never>.isCancelled
+                    }))
+            switch result.completion {
+            case let .processExited(status):
+                return KiroCLIResult(
+                    stdout: result.text,
+                    stderr: "",
+                    terminationStatus: status,
+                    stoppedAfterOutput: false)
+            case .idleTimeout:
+                return KiroCLIResult(
+                    stdout: result.text,
+                    stderr: "",
+                    terminationStatus: 0,
+                    stoppedAfterOutput: true)
+            case .outputCondition, .deadlineExceeded:
+                throw KiroStatusProbeError.timeout
             }
+        } catch TTYCommandRunner.Error.binaryNotFound {
+            throw KiroStatusProbeError.cliNotFound
+        } catch TTYCommandRunner.Error.timedOut {
+            throw KiroStatusProbeError.timeout
+        } catch let TTYCommandRunner.Error.launchFailed(message) {
+            throw KiroStatusProbeError.cliFailed(message)
+        }
+    }
+
+    private func runViaPTYAsync(
+        arguments: [String],
+        timeout: TimeInterval,
+        idleTimeout: TimeInterval,
+        cancellationState: KiroTransportCancellationState) async throws -> KiroCLIResult
+    {
+        let task = Task.detached(priority: .userInitiated) {
+            try self.runViaPTY(
+                arguments: arguments,
+                timeout: timeout,
+                idleTimeout: idleTimeout,
+                cancellationState: cancellationState)
+        }
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            cancellationState.cancel()
+        }
+    }
+
+    private static func validateCommandCompletion(
+        _ result: KiroCLIResult,
+        command: String,
+        allowIdleOutput: Bool) throws
+    {
+        if result.stoppedAfterOutput {
+            guard allowIdleOutput else { throw KiroStatusProbeError.timeout }
+            return
+        }
+        guard result.terminationStatus == 0 else {
+            let message = Self.stripANSI(result.output).trimmingCharacters(in: .whitespacesAndNewlines)
+            throw KiroStatusProbeError.cliFailed(
+                message.isEmpty
+                    ? "Kiro CLI \(command) failed with status \(result.terminationStatus)."
+                    : message)
         }
     }
 
@@ -687,14 +938,15 @@ public struct KiroStatusProbe: Sendable {
         var matchedNewFormat = false
 
         // Parse plan name from "| KIRO FREE" or similar (legacy format)
-        if let planMatch = text.range(of: #"\|\s*(KIRO\s+\w+)"#, options: .regularExpression) {
+        // Horizontal whitespace only ([ \t]) so the match cannot bridge a newline into the next line.
+        if let planMatch = text.range(of: #"\|[ \t]*(KIRO[ \t]+\w+)"#, options: .regularExpression) {
             let raw = String(text[planMatch]).replacingOccurrences(of: "|", with: "")
             planName = raw.trimmingCharacters(in: .whitespaces)
         }
 
         // Parse plan name from "Estimated Usage | resets on 2026-06-01 | KIRO FREE" (kiro-cli 2.x)
         if let estimatedMatch = text.range(
-            of: #"Estimated Usage\s*\|[^\n|]*\|\s*([A-Z][A-Z0-9 ]+)"#,
+            of: #"Estimated Usage[ \t]*\|[^\n|]*\|[ \t]*([A-Z][A-Z0-9 ]+)"#,
             options: .regularExpression)
         {
             let line = String(text[estimatedMatch])
@@ -706,7 +958,7 @@ public struct KiroStatusProbe: Sendable {
         }
 
         // Parse plan name from "Plan: Q Developer Pro" (new format, kiro-cli 1.24+)
-        if let newPlanMatch = text.range(of: #"Plan:\s*(.+)"#, options: .regularExpression) {
+        if let newPlanMatch = text.range(of: #"Plan:[ \t]*(.+)"#, options: .regularExpression) {
             let line = String(text[newPlanMatch])
             let planLine = line.replacingOccurrences(of: "Plan:", with: "").trimmingCharacters(in: .whitespaces)
             if let firstLine = planLine.split(separator: "\n").first {
@@ -798,7 +1050,9 @@ public struct KiroStatusProbe: Sendable {
         return cleaned
             .split(separator: " ")
             .map { word in
-                if word.caseInsensitiveCompare("KIRO") == .orderedSame { return "Kiro" }
+                if word.caseInsensitiveCompare("KIRO") == .orderedSame {
+                    return "Kiro"
+                }
                 return word.prefix(1).uppercased() + word.dropFirst().lowercased()
             }
             .joined(separator: " ")
@@ -826,14 +1080,263 @@ public struct KiroStatusProbe: Sendable {
             .replacingOccurrences(of: #"\x1B|\[[0-9;?]*[A-Za-z]"#, with: "", options: [.regularExpression])
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
+}
 
-    private static func isUsageOutputComplete(_ output: String) -> Bool {
-        let stripped = self.stripANSI(output).lowercased()
-        return stripped.contains("covered in plan")
-            || stripped.contains("resets on")
-            || stripped.contains("bonus credits")
-            || stripped.contains("plan:")
-            || stripped.contains("managed by admin")
+extension KiroStatusProbe {
+    /// Recent Kiro CLIs can keep their TUI alive indefinitely under a PTY even with `--no-interactive`,
+    /// while older releases emit no output through pipes. Prefer pipes and retain PTY as a bounded fallback.
+    private func runCommand(
+        arguments: [String],
+        timeout: TimeInterval,
+        idleTimeout: TimeInterval,
+        kind: KiroCommandKind) async throws -> KiroCLIResult
+    {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(max(0, timeout)))
+        let fallbackDelay = min(max(0, self.pipeTimeoutCap), max(0, timeout / 2))
+        let pipeActivity = KiroPipeActivityState()
+        let cancellationState = KiroTransportCancellationState()
+
+        return try await withThrowingTaskGroup(of: KiroTransportEvent.self) { group in
+            defer {
+                cancellationState.cancel()
+                group.cancelAll()
+            }
+            group.addTask {
+                await .pipe(self.pipeOutcome(
+                    arguments: arguments,
+                    timeout: timeout,
+                    idleTimeout: idleTimeout,
+                    activityState: pipeActivity))
+            }
+            group.addTask {
+                try? await Task.sleep(for: .seconds(fallbackDelay))
+                return .fallbackReady
+            }
+
+            var ptyStarted = false
+            var pipeFinishedWithoutAcceptedResult = false
+            var pendingPTYResult: KiroCLIResult?
+            var pendingPTYFailure: KiroStatusProbeError?
+            while let event = try await group.next() {
+                try Task.checkCancellation()
+                switch event {
+                case .fallbackReady:
+                    guard !ptyStarted, !pipeActivity.hasReceivedOutput else { continue }
+                    let remaining = Self.timeInterval(from: clock.now.duration(to: deadline))
+                    guard remaining > 0 else { continue }
+                    ptyStarted = true
+                    group.addTask {
+                        await .pty(self.ptyOutcome(
+                            arguments: arguments,
+                            timeout: remaining,
+                            idleTimeout: min(idleTimeout, remaining),
+                            cancellationState: cancellationState))
+                    }
+
+                case let .pipe(.result(result)):
+                    if try self.shouldReturnPipeResult(
+                        result,
+                        for: kind,
+                        before: deadline,
+                        now: clock.now)
+                    {
+                        cancellationState.cancel()
+                        group.cancelAll()
+                        return result
+                    }
+                    pipeFinishedWithoutAcceptedResult = true
+                    Self.logger.debug("Kiro pipe \(kind.rawValue) output was incomplete; awaiting PTY fallback")
+                    if let pending = try Self.resolvePendingPTY(
+                        result: pendingPTYResult,
+                        failure: pendingPTYFailure,
+                        before: deadline,
+                        now: clock.now)
+                    {
+                        return pending
+                    }
+                    if !ptyStarted {
+                        let remaining = Self.timeInterval(from: clock.now.duration(to: deadline))
+                        guard remaining > 0 else { throw KiroStatusProbeError.timeout }
+                        ptyStarted = true
+                        group.addTask {
+                            await .pty(self.ptyOutcome(
+                                arguments: arguments,
+                                timeout: remaining,
+                                idleTimeout: min(idleTimeout, remaining),
+                                cancellationState: cancellationState))
+                        }
+                    }
+
+                case .pipe(.failure(.timeout)):
+                    pipeFinishedWithoutAcceptedResult = true
+                    Self.logger.debug("Kiro pipe \(kind.rawValue) probe timed out; awaiting PTY fallback")
+                    if let pending = try Self.resolvePendingPTY(
+                        result: pendingPTYResult,
+                        failure: pendingPTYFailure,
+                        before: deadline,
+                        now: clock.now)
+                    {
+                        return pending
+                    }
+
+                case let .pipe(.failure(error)):
+                    cancellationState.cancel()
+                    group.cancelAll()
+                    throw error
+
+                case .pipe(.cancelled), .pty(.cancelled):
+                    throw CancellationError()
+
+                case let .pty(.result(result)):
+                    guard self.shouldAcceptPTYResult(result, for: kind) else {
+                        if pipeFinishedWithoutAcceptedResult {
+                            try Self.ensureBeforeDeadline(clock.now, deadline: deadline)
+                            return result
+                        }
+                        pendingPTYResult = result
+                        continue
+                    }
+                    guard clock.now <= deadline else { throw KiroStatusProbeError.timeout }
+                    cancellationState.cancel()
+                    group.cancelAll()
+                    return result
+
+                case let .pty(.failure(error)):
+                    if pipeFinishedWithoutAcceptedResult {
+                        throw error
+                    }
+                    pendingPTYFailure = error
+                }
+            }
+            if let pending = try Self.resolvePendingPTY(
+                result: pendingPTYResult,
+                failure: pendingPTYFailure,
+                before: deadline,
+                now: clock.now)
+            {
+                return pending
+            }
+            throw KiroStatusProbeError.timeout
+        }
+    }
+
+    private func pipeOutcome(
+        arguments: [String],
+        timeout: TimeInterval,
+        idleTimeout: TimeInterval,
+        activityState: KiroPipeActivityState) async -> KiroTransportOutcome
+    {
+        do {
+            return try await .result(self.runViaPipe(
+                arguments: arguments,
+                timeout: timeout,
+                idleTimeout: idleTimeout,
+                activityState: activityState))
+        } catch is CancellationError {
+            return .cancelled
+        } catch let error as KiroStatusProbeError {
+            return .failure(error)
+        } catch {
+            return .failure(.cliFailed(error.localizedDescription))
+        }
+    }
+
+    private func ptyOutcome(
+        arguments: [String],
+        timeout: TimeInterval,
+        idleTimeout: TimeInterval,
+        cancellationState: KiroTransportCancellationState) async -> KiroTransportOutcome
+    {
+        do {
+            return try await .result(self.runViaPTYAsync(
+                arguments: arguments,
+                timeout: timeout,
+                idleTimeout: idleTimeout,
+                cancellationState: cancellationState))
+        } catch is CancellationError {
+            return .cancelled
+        } catch let error as KiroStatusProbeError {
+            return .failure(error)
+        } catch {
+            return .failure(.cliFailed(error.localizedDescription))
+        }
+    }
+
+    fileprivate static func resolvePendingPTY(
+        result: KiroCLIResult?,
+        failure: KiroStatusProbeError?,
+        before deadline: ContinuousClock.Instant,
+        now: ContinuousClock.Instant) throws -> KiroCLIResult?
+    {
+        if result != nil || failure != nil {
+            guard now <= deadline else { throw KiroStatusProbeError.timeout }
+        }
+        if let result {
+            return result
+        }
+        if let failure {
+            throw failure
+        }
+        return nil
+    }
+
+    private static func ensureBeforeDeadline(
+        _ now: ContinuousClock.Instant,
+        deadline: ContinuousClock.Instant) throws
+    {
+        guard now <= deadline else { throw KiroStatusProbeError.timeout }
+    }
+
+    private func shouldAcceptPipeResult(_ result: KiroCLIResult, for kind: KiroCommandKind) -> Bool {
+        let output = result.output
+        if Self.isLoginRequired(output) {
+            return true
+        }
+
+        switch kind {
+        case .whoAmI:
+            let account = self.parseWhoAmIOutput(output)
+            return account.authMethod != nil || account.email != nil
+        case .usage:
+            return (try? self.parse(output: output)) != nil
+        case .context:
+            if self.parseContextUsage(output: output) != nil {
+                return true
+            }
+            return result.terminationStatus == 0
+                && !result.stoppedAfterOutput
+                && output.isEmpty
+        }
+    }
+
+    private func shouldReturnPipeResult(
+        _ result: KiroCLIResult,
+        for kind: KiroCommandKind,
+        before deadline: ContinuousClock.Instant,
+        now: ContinuousClock.Instant) throws -> Bool
+    {
+        let accepted = self.shouldAcceptPipeResult(result, for: kind)
+        guard accepted else { return false }
+        if !Self.isLoginRequired(result.output), now > deadline {
+            throw KiroStatusProbeError.timeout
+        }
+        return true
+    }
+
+    private func shouldAcceptPTYResult(_ result: KiroCLIResult, for kind: KiroCommandKind) -> Bool {
+        if Self.isLoginRequired(result.output) {
+            return true
+        }
+        return result.terminationStatus == 0 && self.shouldAcceptPipeResult(result, for: kind)
+    }
+
+    fileprivate static func timeInterval(from duration: Duration) -> TimeInterval {
+        let components = duration.components
+        return max(
+            0,
+            TimeInterval(components.seconds)
+                + TimeInterval(components.attoseconds) / 1_000_000_000_000_000_000)
     }
 }
 

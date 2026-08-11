@@ -12,6 +12,12 @@ read_when:
 - `WidgetSnapshotStore` writes compact JSON snapshots to the app-group container.
 - Widgets read the snapshot and render usage/credits/history states.
 - The app writes snapshots after the main refresh pipeline and token-usage refreshes; narrow single-provider refresh paths may wait for the next snapshot write.
+- Automatic provider refresh is the sole periodic trigger for token/cost refreshes; the token/cost TTL only determines
+  eligibility when that refresh runs. Automatic local-history scans have a 15-minute minimum (30 minutes in low-power
+  mode), while Manual disables automatic scans. The floor limits repeated local-history work and extra WidgetKit reload
+  requests without changing provider usage/status freshness or the user-selected provider refresh cadence.
+- Claude local cost/token history remains eligible for widget snapshots when its account does not expose numeric
+  session or weekly quota data.
 - If no snapshot is available, widgets fall back to preview/empty data.
 
 ## Extension
@@ -24,12 +30,16 @@ read_when:
 - **CodexBar Usage** (`CodexBarUsageWidget`): configurable provider usage widget, small/medium/large.
 - **CodexBar History** (`CodexBarHistoryWidget`): configurable usage-history chart, medium/large.
 - **CodexBar Metric** (`CodexBarCompactWidget`): compact credits/today-cost/30-day-cost widget, small only.
+- **CodexBar Burn Down** (`CodexBarBurnDownWidget`): configurable session or weekly burn-down chart, medium only.
+- **CodexBar Burn Down (Combined)** (`CodexBarCombinedBurnDownWidget`): session and weekly burn-down charts, medium only.
 
 ## Provider picker support
 The configurable provider widgets currently expose:
-Codex, Claude, Gemini, Alibaba, Antigravity, z.ai, Copilot, MiniMax, Kilo, OpenCode, and OpenCode Go.
+Codex, Claude, Cursor, Gemini, Alibaba, Antigravity, z.ai, Copilot, MiniMax, Kilo, OpenCode, and OpenCode Go.
 
 Providers without a `ProviderChoice` case can still be present in the app snapshot, but they are not selectable from the widget configuration UI yet.
+
+Burn-down widgets currently support Codex and Claude. Their dedicated configuration intents keep existing Usage and History widget configurations unchanged.
 
 ## Visibility troubleshooting (macOS 14+)
 When widgets do not appear in the gallery at all, the issue is almost always

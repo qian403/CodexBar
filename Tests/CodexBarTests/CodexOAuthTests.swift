@@ -3,12 +3,18 @@ import Testing
 @testable import CodexBarCore
 
 struct CodexOAuthTests {
-    private func makeContext(sourceMode: ProviderSourceMode = .auto) -> ProviderFetchContext {
+    private func makeContext(
+        runtime: ProviderRuntime = .app,
+        sourceMode: ProviderSourceMode = .auto,
+        includeCredits: Bool = true,
+        includeOptionalUsage: Bool = true) -> ProviderFetchContext
+    {
         let browserDetection = BrowserDetection(cacheTTL: 0)
         return ProviderFetchContext(
-            runtime: .app,
+            runtime: runtime,
             sourceMode: sourceMode,
-            includeCredits: true,
+            includeCredits: includeCredits,
+            includeOptionalUsage: includeOptionalUsage,
             webTimeout: 60,
             webDebugDumpHTML: false,
             verbose: false,
@@ -75,6 +81,32 @@ struct CodexOAuthTests {
         #expect(creds.refreshToken.isEmpty)
         #expect(creds.idToken == nil)
         #expect(creds.accountId == nil)
+    }
+
+    @Test
+    func `reset-credit token load ignores an API key beside O auth tokens`() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codexbar-reset-credit-oauth-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+        let json = """
+        {
+          "OPENAI_API_KEY": "sk-test",
+          "tokens": {
+            "access_token": "oauth-access-token",
+            "refresh_token": "oauth-refresh-token",
+            "account_id": "account-123"
+          },
+          "last_refresh": "2026-07-01T12:00:00Z"
+        }
+        """
+        try Data(json.utf8).write(to: home.appendingPathComponent("auth.json"))
+
+        let credentials = try CodexOAuthCredentialsStore.loadOAuthTokens(env: ["CODEX_HOME": home.path])
+
+        #expect(credentials.accessToken == "oauth-access-token")
+        #expect(credentials.refreshToken == "oauth-refresh-token")
+        #expect(credentials.accountId == "account-123")
     }
 
     @Test
@@ -162,6 +194,73 @@ struct CodexOAuthTests {
         #expect(snapshot.secondary?.windowMinutes == 10080)
         #expect(snapshot.primary?.resetsAt != nil)
         #expect(snapshot.secondary?.resetsAt != nil)
+    }
+
+    @Test
+    func `O auth response with precise windows maps to exact confidence`() throws {
+        let json = """
+        {
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 22,
+              "reset_at": 1766948068,
+              "limit_window_seconds": 18000
+            },
+            "secondary_window": {
+              "used_percent": 43,
+              "reset_at": 1767407914,
+              "limit_window_seconds": 604800
+            }
+          }
+        }
+        """
+        let creds = CodexOAuthCredentials(
+            accessToken: "access",
+            refreshToken: "refresh",
+            idToken: nil,
+            accountId: nil,
+            lastRefresh: Date())
+        let result = try CodexOAuthFetchStrategy._mapResultForTesting(Data(json.utf8), credentials: creds)
+
+        #expect(result.sourceLabel == "oauth")
+        #expect(result.usage.dataConfidence == .exact)
+        #expect(result.usage.primary?.usedPercent == 22)
+        #expect(result.usage.secondary?.usedPercent == 43)
+    }
+
+    @Test
+    func `O auth response with malformed additional window maps to unknown confidence`() throws {
+        let json = """
+        {
+          "rate_limit": {
+            "primary_window": {
+              "used_percent": 22,
+              "reset_at": 1766948068,
+              "limit_window_seconds": 18000
+            }
+          },
+          "additional_rate_limits": [
+            {
+              "limit_name": "GPT-5.3-Codex-Spark",
+              "metered_feature": "gpt_5_3_codex_spark",
+              "rate_limit": {
+                "primary_window": { "used_percent": "bad" }
+              }
+            }
+          ]
+        }
+        """
+        let creds = CodexOAuthCredentials(
+            accessToken: "access",
+            refreshToken: "refresh",
+            idToken: nil,
+            accountId: nil,
+            lastRefresh: Date())
+        let result = try CodexOAuthFetchStrategy._mapResultForTesting(Data(json.utf8), credentials: creds)
+
+        #expect(result.usage.primary?.usedPercent == 22)
+        #expect(result.usage.extraRateWindows == nil)
+        #expect(result.usage.dataConfidence == .unknown)
     }
 
     @Test
@@ -352,6 +451,11 @@ struct CodexOAuthTests {
         let snapshot = try CodexOAuthFetchStrategy._mapUsageForTesting(Data(json.utf8), credentials: creds)
         #expect(snapshot?.primary?.usedPercent == 18)
         #expect(snapshot?.secondary == nil)
+
+        let result = try CodexOAuthFetchStrategy._mapResultForTesting(Data(json.utf8), credentials: creds)
+        #expect(result.usage.primary?.usedPercent == 18)
+        #expect(result.usage.secondary == nil)
+        #expect(result.usage.dataConfidence == .unknown)
     }
 
     @Test

@@ -3,11 +3,52 @@ import CodexBarCore
 import QuartzCore
 import SwiftUI
 
+enum HostedSubviewContentFingerprint: Equatable {
+    case text(String)
+    case costHistory(CostHistoryChartMenuView.RenderFingerprint)
+}
+
+struct HostedSubviewRenderSignature: Equatable {
+    let chartID: String
+    let providerRawValue: String?
+    let widthBitPattern: UInt64
+    let content: HostedSubviewContentFingerprint
+}
+
+final class HostedSubviewRenderSignatureBox: NSObject {
+    let signature: HostedSubviewRenderSignature
+
+    init(_ signature: HostedSubviewRenderSignature) {
+        self.signature = signature
+    }
+}
+
 extension StatusItemController {
     private struct HostedSubviewIdentity {
         let chartID: String
         let provider: UsageProvider?
         let providerRawValue: String?
+    }
+
+    func refreshHostedSubviewHeights(in menu: NSMenu) {
+        let width = self.renderedMenuWidth(for: menu)
+
+        for item in menu.items {
+            guard let view = item.view else { continue }
+            let height = self.hostedSubviewFittingHeight(for: view, width: width)
+            view.frame = NSRect(origin: .zero, size: NSSize(width: width, height: height))
+        }
+    }
+
+    /// Measures the natural height of a hosted submenu view at the given width using the live
+    /// view that will actually be displayed. Hosted chart items used to spin up a second,
+    /// throwaway `NSHostingController` purely to size the chart even though every build path
+    /// immediately re-measures the live view via `fittingSize`; that extra SwiftUI hierarchy was
+    /// pure overhead on a popup-menu hot path, so callers now size the displayed view directly.
+    func hostedSubviewFittingHeight(for view: NSView, width: CGFloat) -> CGFloat {
+        view.frame = NSRect(origin: .zero, size: NSSize(width: width, height: 1))
+        view.layoutSubtreeIfNeeded()
+        return view.fittingSize.height
     }
 
     func isHostedSubviewMenu(_ menu: NSMenu) -> Bool {
@@ -17,7 +58,7 @@ extension StatusItemController {
             Self.costHistoryChartID,
             Self.usageHistoryChartID,
             Self.storageBreakdownID,
-            Self.zaiHourlyUsageChartID,
+            Self.statusComponentsID,
         ]
         return menu.items.contains { item in
             guard let id = item.representedObject as? String else { return false }
@@ -93,11 +134,11 @@ extension StatusItemController {
             } else {
                 false
             }
-        case Self.zaiHourlyUsageChartID:
-            if let providerRawValue = placeholder.toolTip,
+        case Self.statusComponentsID:
+            if let providerRawValue = self.hostedSubviewProviderRawValue(for: placeholder),
                let provider = UsageProvider(rawValue: providerRawValue)
             {
-                self.appendZaiHourlyUsageChartItem(to: menu, provider: provider, width: width)
+                self.appendStatusComponentsItem(to: menu, provider: provider, width: width)
             } else {
                 false
             }
@@ -123,10 +164,7 @@ extension StatusItemController {
             return
         }
         let signature = self.hostedSubviewRenderSignature(identity: identity, width: width)
-        if self.hostedSubviewRenderSignatures.object(forKey: menu) as String? == signature {
-            if identity.chartID == Self.zaiHourlyUsageChartID {
-                self.refreshHostedSubviewHeights(in: menu)
-            }
+        if self.hostedSubviewRenderSignatures.object(forKey: menu)?.signature == signature {
             return
         }
 
@@ -157,9 +195,9 @@ extension StatusItemController {
             } else {
                 false
             }
-        case Self.zaiHourlyUsageChartID:
+        case Self.statusComponentsID:
             if let provider = identity.provider {
-                self.appendZaiHourlyUsageChartItem(to: menu, provider: provider, width: width)
+                self.appendStatusComponentsItem(to: menu, provider: provider, width: width)
             } else {
                 false
             }
@@ -174,14 +212,16 @@ extension StatusItemController {
                 chartID: identity.chartID,
                 providerRawValue: identity.provider?.rawValue ?? identity.providerRawValue)
         }
-        self.hostedSubviewRenderSignatures.setObject(signature as NSString, forKey: menu)
+        self.hostedSubviewRenderSignatures.setObject(
+            HostedSubviewRenderSignatureBox(signature),
+            forKey: menu)
     }
 
     private func hostedSubviewIdentity(for menu: NSMenu)
     -> HostedSubviewIdentity? {
         for item in menu.items {
             guard let chartID = item.representedObject as? String else { continue }
-            let providerRawValue = item.toolTip
+            let providerRawValue = self.hostedSubviewProviderRawValue(for: item)
             return HostedSubviewIdentity(
                 chartID: chartID,
                 provider: providerRawValue.flatMap(UsageProvider.init(rawValue:)),
@@ -190,58 +230,67 @@ extension StatusItemController {
         return nil
     }
 
+    private func hostedSubviewProviderRawValue(for item: NSMenuItem) -> String? {
+        if let providerRawValue = item.toolTip {
+            return providerRawValue
+        }
+        guard item.representedObject as? String == Self.statusComponentsID else { return nil }
+        return item.identifier?.rawValue
+    }
+
     private func recordHostedSubviewRenderSignature(
         for menu: NSMenu,
         identity: HostedSubviewIdentity,
         width: CGFloat)
     {
         let signature = self.hostedSubviewRenderSignature(identity: identity, width: width)
-        self.hostedSubviewRenderSignatures.setObject(signature as NSString, forKey: menu)
+        self.hostedSubviewRenderSignatures.setObject(
+            HostedSubviewRenderSignatureBox(signature),
+            forKey: menu)
     }
 
     private func hostedSubviewRenderSignature(
         identity: HostedSubviewIdentity,
-        width: CGFloat) -> String
+        width: CGFloat) -> HostedSubviewRenderSignature
     {
-        let contentSignature: String = switch identity.chartID {
+        let contentSignature: HostedSubviewContentFingerprint = switch identity.chartID {
         case Self.usageBreakdownChartID:
-            Self.dashboardBreakdownReadinessSignature(
+            .text(Self.dashboardBreakdownReadinessSignature(
                 OpenAIDashboardDailyBreakdown.removingSkillUsageServices(
-                    from: self.store.openAIDashboard?.usageBreakdown ?? []))
+                    from: self.store.openAIDashboard?.usageBreakdown ?? [])))
         case Self.creditsHistoryChartID:
-            Self.dashboardBreakdownReadinessSignature(self.store.openAIDashboard?.dailyBreakdown ?? [])
+            .text(Self.dashboardBreakdownReadinessSignature(self.store.openAIDashboard?.dailyBreakdown ?? []))
         case Self.costHistoryChartID:
-            identity.provider.map(self.costHistoryRenderSignature(for:)) ?? "missing-provider"
+            if let provider = identity.provider {
+                self.costHistoryRenderFingerprint(for: provider)
+            } else {
+                .text("missing-provider")
+            }
         case Self.usageHistoryChartID:
-            identity.provider.map(self.usageHistoryRenderSignature(for:)) ?? "missing-provider"
+            .text(identity.provider.map(self.usageHistoryRenderSignature(for:)) ?? "missing-provider")
         case Self.storageBreakdownID:
-            identity.provider.map(self.storageBreakdownRenderSignature(for:)) ?? "missing-provider"
-        case Self.zaiHourlyUsageChartID:
-            identity.provider.map(self.zaiHourlyUsageRenderSignature(for:)) ?? "missing-provider"
+            .text(identity.provider.map(self.storageBreakdownRenderSignature(for:)) ?? "missing-provider")
+        case Self.statusComponentsID:
+            .text(identity.provider.map(self.statusComponentsRenderSignature(for:)) ?? "missing-provider")
         default:
-            "unknown"
+            .text("unknown")
         }
-        return [
-            identity.chartID,
-            identity.providerRawValue ?? "",
-            String(Double(width).bitPattern, radix: 16),
-            contentSignature,
-        ].joined(separator: "|")
+        return HostedSubviewRenderSignature(
+            chartID: identity.chartID,
+            providerRawValue: identity.providerRawValue,
+            widthBitPattern: Double(width).bitPattern,
+            content: contentSignature)
     }
 
-    private func costHistoryRenderSignature(for provider: UsageProvider) -> String {
-        guard let snapshot = self.tokenSnapshotForCostHistorySubmenu(provider: provider) else { return "none" }
-        return [
-            snapshot.currencyCode,
-            "\(snapshot.historyDays)",
-            snapshot.historyLabel ?? "",
-            snapshot.last30DaysCostUSD.map { String($0.bitPattern, radix: 16) } ?? "nil",
-            String(reflecting: snapshot.daily),
-        ].joined(separator: "|")
+    private func costHistoryRenderFingerprint(for provider: UsageProvider) -> HostedSubviewContentFingerprint {
+        guard let snapshot = self.tokenSnapshotForCostHistorySubmenu(provider: provider) else {
+            return .text("none")
+        }
+        return .costHistory(CostHistoryChartMenuView.renderFingerprint(from: snapshot, provider: provider))
     }
 
     private func usageHistoryRenderSignature(for provider: UsageProvider) -> String {
-        let snapshot = self.store.snapshot(for: provider)
+        let snapshot = self.store.snapshot(for: provider.instanceID)
         let selection = self.store.planUtilizationHistorySelection(for: provider)
         return [
             "\(self.store.planUtilizationHistoryRevision)",
@@ -251,6 +300,16 @@ extension StatusItemController {
             snapshot?.secondary == nil ? "0" : "1",
             snapshot?.tertiary == nil ? "0" : "1",
         ].joined(separator: "|")
+    }
+
+    func statusComponentsRenderSignature(for provider: UsageProvider) -> String {
+        let components = self.store.statusComponents(for: provider)
+        guard !components.isEmpty else { return "none" }
+        func signature(_ component: ProviderStatusComponent) -> String {
+            let childSig = component.children.map(signature).joined(separator: ",")
+            return "\(component.id)=\(component.indicator.rawValue)[\(childSig)]"
+        }
+        return components.map(signature).joined(separator: ";")
     }
 
     private func storageBreakdownRenderSignature(for provider: UsageProvider) -> String {
@@ -265,39 +324,6 @@ extension StatusItemController {
             footprint.unreadablePaths.joined(separator: ";"),
             components,
             String(Double(self.storageBreakdownMenuMaxHeight()).bitPattern, radix: 16),
-        ].joined(separator: "|")
-    }
-
-    private func zaiHourlyUsageRenderSignature(for provider: UsageProvider) -> String {
-        guard let modelUsage = self.store.snapshot(for: provider)?.zaiUsage?.modelUsage else { return "none" }
-        return Self.zaiHourlyUsageRenderSignature(modelUsage: modelUsage, now: Date())
-    }
-
-    static func zaiHourlyUsageRenderSignature(modelUsage: ZaiModelUsageData, now: Date) -> String {
-        let models = modelUsage.modelDataList
-            .map { model in
-                let usage = model.tokensUsage
-                    .map { $0.map(String.init) ?? "nil" }
-                    .joined(separator: ",")
-                return "\(model.modelName ?? "")=\(usage)"
-            }
-            .joined(separator: ";")
-        let ranges: [ZaiHourlyRange] = [.today(referenceDate: now), .last24h]
-        let visibleBars = ranges
-            .map { range in
-                ZaiHourlyBars.from(modelData: modelUsage, range: range, now: now)
-                    .map { bar in
-                        let segments = bar.segments
-                            .map { "\($0.model)=\($0.tokens)" }
-                            .joined(separator: ",")
-                        return "\(bar.label):\(segments)"
-                    }
-                    .joined(separator: ";")
-            }
-        return [
-            modelUsage.xTime.joined(separator: ","),
-            models,
-            visibleBars.joined(separator: "|"),
         ].joined(separator: "|")
     }
 
@@ -393,11 +419,13 @@ extension StatusItemController {
             currencyCode: tokenSnapshot.currencyCode,
             historyDays: tokenSnapshot.historyDays,
             windowLabel: tokenSnapshot.historyLabel,
+            projects: provider == .codex ? tokenSnapshot.projects : [],
+            sessions: provider == .codex ? tokenSnapshot.sessions : [],
             width: width)
         let hosting = MenuHostingView(rootView: chartView)
-        hosting.frame = NSRect(
-            origin: .zero,
-            size: NSSize(width: width, height: self.hostedSubviewFittingHeight(for: hosting, width: width)))
+        hosting.applyMeasuredHeight(
+            width: width,
+            height: self.hostedSubviewFittingHeight(for: hosting, width: width))
 
         let chartItem = NSMenuItem()
         chartItem.view = hosting
@@ -429,11 +457,24 @@ extension StatusItemController {
         }
 
         let maxHeight = self.storageBreakdownMenuMaxHeight()
-        let view = StorageBreakdownMenuView(footprint: footprint, width: width, maxHeight: maxHeight)
+        final class HostingRelay {
+            weak var hosting: MenuHostingView<StorageBreakdownMenuView>?
+            var collapsedHeight: CGFloat = 1
+        }
+        let relay = HostingRelay()
+        let view = StorageBreakdownMenuView(
+            footprint: footprint,
+            width: width,
+            maxHeight: maxHeight,
+            onExpansionHeightChange: { additionalHeight in
+                relay.hosting?.applyMeasuredHeight(
+                    width: width,
+                    height: min(maxHeight, relay.collapsedHeight + additionalHeight))
+            })
         let hosting = MenuHostingView(rootView: view)
-        hosting.frame = NSRect(
-            origin: .zero,
-            size: NSSize(width: width, height: self.hostedSubviewFittingHeight(for: hosting, width: width)))
+        relay.hosting = hosting
+        relay.collapsedHeight = self.hostedSubviewFittingHeight(for: hosting, width: width)
+        hosting.applyMeasuredHeight(width: width, height: relay.collapsedHeight)
 
         let item = NSMenuItem()
         item.view = hosting
@@ -444,43 +485,92 @@ extension StatusItemController {
         return true
     }
 
-    private func storageBreakdownMenuMaxHeight() -> CGFloat {
-        let visibleHeight = NSScreen.main?.visibleFrame.height ?? 900
-        return min(620, max(360, floor(visibleHeight * 0.72)))
-    }
-
     @discardableResult
-    func appendZaiHourlyUsageChartItem(
+    func appendStatusComponentsItem(
         to submenu: NSMenu,
         provider: UsageProvider,
         width: CGFloat) -> Bool
     {
-        guard provider == .zai,
-              let snapshot = self.store.snapshot(for: provider),
-              let modelUsage = snapshot.zaiUsage?.modelUsage
-        else { return false }
+        // The list of component rows is shown only once the provider's status has been fetched.
+        // Before the first fetch lands the submenu still renders (just the website link below), so
+        // every provider with a status feed gets the native submenu rather than a bare link; it
+        // re-hydrates with the live component list once data arrives (see makeStatusComponentsSubmenu).
+        let components = Self.filterStatusComponents(self.store.statusComponents(for: provider), for: provider)
+        if !components.isEmpty {
+            if self.menuCardRenderingEnabledForController {
+                final class HostingRelay {
+                    weak var hosting: MenuHostingView<StatusComponentsMenuView>?
+                }
+                let relay = HostingRelay()
+                let listView = StatusComponentsMenuView(
+                    components: components,
+                    width: width,
+                    onToggle: {
+                        // Re-measure the live content after SwiftUI applies the expand/collapse so the
+                        // row grows/shrinks to fit exactly (no leftover blank space).
+                        DispatchQueue.main.async {
+                            guard let hosting = relay.hosting else { return }
+                            hosting.applyMeasuredHeight(
+                                width: width,
+                                height: hosting.measuredFittingHeight(width: width))
+                        }
+                    })
+                let hosting = MenuHostingView(rootView: listView)
+                relay.hosting = hosting
+                hosting.applyMeasuredHeight(width: width, height: hosting.measuredFittingHeight(width: width))
 
-        if !self.menuCardRenderingEnabledForController {
-            let chartItem = NSMenuItem()
-            chartItem.isEnabled = false
-            chartItem.representedObject = Self.zaiHourlyUsageChartID
-            chartItem.toolTip = provider.rawValue
-            submenu.addItem(chartItem)
-            return true
+                let listItem = NSMenuItem()
+                listItem.view = hosting
+                listItem.isEnabled = false
+                listItem.representedObject = Self.statusComponentsID
+                listItem.toolTip = provider.rawValue
+                submenu.addItem(listItem)
+            } else {
+                let placeholder = NSMenuItem()
+                placeholder.isEnabled = false
+                placeholder.representedObject = Self.statusComponentsID
+                placeholder.toolTip = provider.rawValue
+                submenu.addItem(placeholder)
+            }
+
+            submenu.addItem(.separator())
         }
 
-        let chartView = ZaiHourlyUsageChartMenuView(modelUsage: modelUsage, width: width)
-        let hosting = MenuHostingView(rootView: chartView)
-        hosting.frame = NSRect(
-            origin: .zero,
-            size: NSSize(width: width, height: self.hostedSubviewFittingHeight(for: hosting, width: width)))
-
-        let chartItem = NSMenuItem()
-        chartItem.view = hosting
-        chartItem.isEnabled = false
-        chartItem.representedObject = Self.zaiHourlyUsageChartID
-        chartItem.toolTip = provider.rawValue
-        submenu.addItem(chartItem)
+        let linkItem = NSMenuItem(
+            title: L("Open Status Page"),
+            action: #selector(self.openStatusPageFromMenuItem(_:)),
+            keyEquivalent: "")
+        linkItem.target = self
+        // Tag the link with the chart identity so the menu is still recognized as a status
+        // submenu (and re-hydrates) when the component list hasn't loaded yet and the link is the
+        // only row. The identifier also scopes the action to this submenu's provider so a later
+        // menu selection change cannot open another provider's status page.
+        linkItem.representedObject = Self.statusComponentsID
+        linkItem.identifier = NSUserInterfaceItemIdentifier(provider.rawValue)
+        if let image = NSImage(systemSymbolName: "arrow.up.right.square", accessibilityDescription: nil) {
+            image.isTemplate = true
+            image.size = NSSize(width: 16, height: 16)
+            linkItem.image = image
+        }
+        submenu.addItem(linkItem)
         return true
     }
+
+    private func storageBreakdownMenuMaxHeight() -> CGFloat {
+        let visibleHeight = NSScreen.main?.visibleFrame.height ?? 900
+        return min(620, max(360, floor(visibleHeight * 0.72)))
+    }
 }
+
+#if DEBUG
+extension StatusItemController {
+    func _hostedSubviewRenderSignatureForTesting(menu: NSMenu, width: CGFloat) -> HostedSubviewRenderSignature? {
+        guard let identity = self.hostedSubviewIdentity(for: menu) else { return nil }
+        return self.hostedSubviewRenderSignature(identity: identity, width: width)
+    }
+
+    func _storedHostedSubviewRenderSignatureForTesting(menu: NSMenu) -> HostedSubviewRenderSignature? {
+        self.hostedSubviewRenderSignatures.object(forKey: menu)?.signature
+    }
+}
+#endif

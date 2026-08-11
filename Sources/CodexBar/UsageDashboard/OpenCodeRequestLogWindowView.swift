@@ -244,6 +244,7 @@ struct OpenCodeRequestLogWindowHost: View {
         ProviderDescriptorRegistry.descriptor(for: provider).branding.color.swiftUIColor
     }
 
+    /// Provider-specific by design: this window renders only the OpenCode SQLite request log.
     private func loadLogIfNeeded(for provider: UsageProvider?) async {
         guard let provider, provider == .opencode || provider == .opencodego else { return }
         if self.store.openCodeRequestLog(for: provider) == nil {

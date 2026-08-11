@@ -4,7 +4,7 @@ import Foundation
 extension SettingsStore {
     /// User-chosen display name for a custom slot (stored in `workspaceID`).
     func customDisplayName(for provider: UsageProvider) -> String {
-        self.configSnapshot.providerConfig(for: provider)?.sanitizedWorkspaceID ?? ""
+        self.configSnapshot.providerConfig(for: provider.instanceID)?.sanitizedWorkspaceID ?? ""
     }
 
     func setCustomDisplayName(_ provider: UsageProvider, _ newValue: String) {
@@ -20,7 +20,7 @@ extension SettingsStore {
     }
 
     func customAPIKey(for provider: UsageProvider) -> String {
-        self.configSnapshot.providerConfig(for: provider)?.sanitizedAPIKey ?? ""
+        self.configSnapshot.providerConfig(for: provider.instanceID)?.sanitizedAPIKey ?? ""
     }
 
     func setCustomAPIKey(_ provider: UsageProvider, _ newValue: String) {
@@ -31,7 +31,7 @@ extension SettingsStore {
     }
 
     func customBaseURL(for provider: UsageProvider) -> String {
-        self.configSnapshot.providerConfig(for: provider)?.sanitizedEnterpriseHost ?? ""
+        self.configSnapshot.providerConfig(for: provider.instanceID)?.sanitizedEnterpriseHost ?? ""
     }
 
     func setCustomBaseURL(_ provider: UsageProvider, _ newValue: String) {
@@ -42,7 +42,7 @@ extension SettingsStore {
 
     /// new-api `New-Api-User` header value (numeric user id), stored in `region`.
     func customUserID(for provider: UsageProvider) -> String {
-        self.configSnapshot.providerConfig(for: provider)?.region ?? ""
+        self.configSnapshot.providerConfig(for: provider.instanceID)?.region ?? ""
     }
 
     func setCustomUserID(_ provider: UsageProvider, _ newValue: String) {

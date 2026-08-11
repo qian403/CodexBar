@@ -13,7 +13,7 @@ struct OpenAIDashboardWebViewLease {
 @MainActor
 final class OpenAIDashboardWebViewCache {
     static let shared = OpenAIDashboardWebViewCache()
-    fileprivate static let log = CodexBarLog.logger(LogCategories.openAIWebview)
+    fileprivate static let log = CodexBarLog.logger(LogCategories.provider(.openai, scope: "webview"))
 
     private final class ReleaseState {
         var preserveLoadedPageOnRelease: Bool
@@ -162,6 +162,15 @@ final class OpenAIDashboardWebViewCache {
         self.idleTimeout = idleTimeout
     }
 
+    nonisolated static func remainingNavigationTimeout(
+        until deadline: Date,
+        now: Date = Date()) throws -> TimeInterval
+    {
+        let remaining = deadline.timeIntervalSince(now)
+        guard remaining > 0 else { throw URLError(.timedOut) }
+        return remaining
+    }
+
     private func releaseCachedEntry(_ entry: Entry, preserveLoadedPage: Bool) {
         entry.isBusy = false
         let now = Date()
@@ -282,7 +291,7 @@ final class OpenAIDashboardWebViewCache {
         allowTimeoutRetry: Bool = true,
         preserveLoadedPageOnRelease: Bool = false) async throws -> OpenAIDashboardWebViewLease
     {
-        let deadline = Date().addingTimeInterval(max(navigationTimeout, 1))
+        let deadline = Date().addingTimeInterval(max(navigationTimeout, 0.01))
         return try await self.acquire(
             websiteDataStore: websiteDataStore,
             usageURL: usageURL,
@@ -307,7 +316,7 @@ final class OpenAIDashboardWebViewCache {
             logger?("[webview] \(message)")
         }
         let key = ObjectIdentifier(websiteDataStore)
-        let remainingTimeout = max(0.5, deadline.timeIntervalSince(now))
+        let remainingTimeout = try Self.remainingNavigationTimeout(until: deadline, now: now)
 
         if let entry = self.entries[key] {
             if entry.isBusy {
@@ -460,6 +469,21 @@ final class OpenAIDashboardWebViewCache {
         }
     }
 
+    func evictIdle() {
+        let idleEntries = self.entries.filter { _, entry in
+            !entry.isBusy
+        }
+        guard !idleEntries.isEmpty else { return }
+
+        for (key, entry) in idleEntries {
+            entry.clearPreservedPage()
+            entry.host.close()
+            self.entries.removeValue(forKey: key)
+        }
+        Self.log.debug("OpenAI idle webviews evicted", metadata: ["count": "\(idleEntries.count)"])
+        self.scheduleNextIdlePrune()
+    }
+
     private func prepareCachedWebViewForIdle(
         _ webView: WKWebView,
         host: OffscreenWebViewHost,
@@ -548,6 +572,10 @@ final class OpenAIDashboardWebViewCache {
             source: self.preferredLanguageScript,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false))
+        userContentController.addUserScript(WKUserScript(
+            source: openAISubscriptionCaptureScript,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true))
         config.userContentController = userContentController
         if #available(macOS 14.0, *) {
             config.preferences.inactiveSchedulingPolicy = .suspend
@@ -611,7 +639,7 @@ final class OpenAIDashboardWebViewCache {
         log: @escaping (String) -> Void,
         deadline: Date) async throws -> OpenAIDashboardWebViewLease
     {
-        let remainingTimeout = max(0.5, deadline.timeIntervalSinceNow)
+        let remainingTimeout = try Self.remainingNavigationTimeout(until: deadline)
         let (webView, host) = self.makeWebView(websiteDataStore: websiteDataStore)
         host.show()
         do {

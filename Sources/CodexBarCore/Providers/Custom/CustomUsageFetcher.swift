@@ -63,7 +63,7 @@ public struct CustomUsageSnapshot: Codable, Sendable, Equatable {
                 updatedAt: self.updatedAt),
             updatedAt: self.updatedAt,
             identity: ProviderIdentitySnapshot(
-                providerID: provider,
+                providerID: provider.instanceID,
                 accountEmail: nil,
                 accountOrganization: nil,
                 loginMethod: self.planName))

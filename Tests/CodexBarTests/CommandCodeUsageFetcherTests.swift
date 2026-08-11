@@ -8,6 +8,13 @@ import FoundationNetworking
 /// Tests for `CommandCodeUsageFetcher` parsers and the cookie/snapshot derivation,
 /// using real responses captured from api.commandcode.ai for an active "individual-go" plan.
 struct CommandCodeUsageFetcherTests {
+    private static func creditsFixture(_ name: String) throws -> Data {
+        try Data(contentsOf: #require(Bundle.module.url(
+            forResource: name,
+            withExtension: "json",
+            subdirectory: "Fixtures/Providers/CommandCode")))
+    }
+
     private static let creditsJSON = """
     {"credits":{"belowThreshold":false,"creditThreshold":0,"monthlyCredits":8.7784,\
     "purchasedCredits":0,"premiumMonthlyCredits":0,"opensourceMonthlyCredits":8.7784}}
@@ -34,6 +41,36 @@ struct CommandCodeUsageFetcherTests {
     }
 
     @Test
+    func `parses rolling windows at response root`() throws {
+        let payload = try CommandCodeUsageFetcher.parseCredits(
+            data: Self.creditsFixture("window-limits-root"))
+
+        #expect(payload.monthlyCredits == 8.5)
+        let fiveHour = try #require(payload.fiveHourWindow)
+        #expect(fiveHour.usedPercent == 25)
+        #expect(fiveHour.windowMinutes == 5 * 60)
+        #expect(fiveHour.resetsAt == Date(timeIntervalSince1970: 1_780_000_000))
+        let weekly = try #require(payload.weeklyWindow)
+        #expect(weekly.usedPercent == 10)
+        #expect(weekly.windowMinutes == 7 * 24 * 60)
+        #expect(weekly.resetsAt == Date(timeIntervalSince1970: 1_780_100_000))
+    }
+
+    @Test
+    func `parses rolling windows nested in credits`() throws {
+        let payload = try CommandCodeUsageFetcher.parseCredits(
+            data: Self.creditsFixture("window-limits-nested"))
+
+        #expect(payload.monthlyCredits == 7.25)
+        let fiveHour = try #require(payload.fiveHourWindow)
+        #expect(fiveHour.usedPercent == 25)
+        #expect(fiveHour.resetsAt == Date(timeIntervalSince1970: 1_780_200_000))
+        let weekly = try #require(payload.weeklyWindow)
+        #expect(weekly.usedPercent == 20)
+        #expect(weekly.resetsAt == Date(timeIntervalSince1970: 1_780_300_000))
+    }
+
+    @Test
     func `parses subscription payload`() throws {
         let data = try #require(Self.subscriptionJSON.data(using: .utf8))
         let payload = try #require(try CommandCodeUsageFetcher.parseSubscription(data: data))
@@ -50,6 +87,62 @@ struct CommandCodeUsageFetcherTests {
         let data = Data(#"{"success":true,"data":null}"#.utf8)
         let payload = try CommandCodeUsageFetcher.parseSubscription(data: data)
         #expect(payload == nil)
+    }
+
+    @Test
+    func `successful free tier lookup has no usage window`() async throws {
+        let transport = ProviderHTTPTransportStub { request in
+            let path = try #require(request.url?.path)
+            let body = if path.hasSuffix("/credits") {
+                """
+                {"credits":{"monthlyCredits":0,"purchasedCredits":0,
+                "premiumMonthlyCredits":0,"opensourceMonthlyCredits":0}}
+                """
+            } else {
+                #"{"success":true,"data":null}"#
+            }
+            return try Self.response(request: request, statusCode: 200, body: body)
+        }
+
+        let snapshot = try await CommandCodeUsageFetcher.fetchUsage(
+            cookieHeader: "session=valid",
+            session: transport)
+
+        #expect(snapshot.subscriptionEnrichmentUnavailable == false)
+        #expect(snapshot.toUsageSnapshot().primary == nil)
+    }
+
+    @Test
+    func `subscription failure envelope preserves required credits`() async throws {
+        let transport = ProviderHTTPTransportStub { request in
+            let path = try #require(request.url?.path)
+            if path.hasSuffix("/credits") {
+                return try Self.response(request: request, statusCode: 200, body: Self.creditsJSON)
+            }
+            return try Self.response(
+                request: request,
+                statusCode: 200,
+                body: #"{"success":false,"error":"temporarily unavailable"}"#)
+        }
+
+        let snapshot = try await CommandCodeUsageFetcher.fetchUsage(
+            cookieHeader: "session=valid",
+            session: transport,
+            now: Date(timeIntervalSince1970: 123))
+
+        #expect(snapshot.monthlyCreditsRemaining == 8.7784)
+        #expect(snapshot.plan == nil)
+        #expect(snapshot.subscriptionEnrichmentUnavailable)
+        #expect(snapshot.updatedAt == Date(timeIntervalSince1970: 123))
+    }
+
+    @Test
+    func `successful subscription envelope requires explicit data`() throws {
+        let data = Data(#"{"success":true}"#.utf8)
+
+        #expect(throws: CommandCodeUsageError.self) {
+            try CommandCodeUsageFetcher.parseSubscription(data: data)
+        }
     }
 
     @Test
@@ -70,6 +163,7 @@ struct CommandCodeUsageFetcherTests {
         #expect(snapshot.monthlyCreditsRemaining == 8.7784)
         #expect(snapshot.plan == nil)
         #expect(snapshot.billingPeriodEnd == nil)
+        #expect(snapshot.subscriptionEnrichmentUnavailable)
         #expect(snapshot.updatedAt == Date(timeIntervalSince1970: 123))
     }
 
@@ -92,6 +186,7 @@ struct CommandCodeUsageFetcherTests {
 
         #expect(snapshot.monthlyCreditsRemaining == 8.7784)
         #expect(snapshot.plan == nil)
+        #expect(snapshot.subscriptionEnrichmentUnavailable)
         #expect(elapsed < .seconds(3), "Subscription enrichment delayed credits: \(elapsed)")
     }
 
@@ -119,6 +214,7 @@ struct CommandCodeUsageFetcherTests {
 
         #expect(snapshot.monthlyCreditsRemaining == 8.7784)
         #expect(snapshot.plan == nil)
+        #expect(snapshot.subscriptionEnrichmentUnavailable)
         #expect(elapsed < .milliseconds(300), "Subscription enrichment delayed credits: \(elapsed)")
 
         // Let the deliberately cancellation-ignoring test task drain before the test exits.
@@ -252,6 +348,16 @@ struct CommandCodeUsageFetcherTests {
             purchasedCredits: 0,
             premiumMonthlyCredits: 0,
             opensourceMonthlyCredits: 8.7784,
+            fiveHourWindow: RateWindow(
+                usedPercent: 25,
+                windowMinutes: 5 * 60,
+                resetsAt: Date(timeIntervalSince1970: 1_779_000_000),
+                resetDescription: nil),
+            weeklyWindow: RateWindow(
+                usedPercent: 10,
+                windowMinutes: 7 * 24 * 60,
+                resetsAt: Date(timeIntervalSince1970: 1_779_500_000),
+                resetDescription: nil),
             plan: plan,
             billingPeriodEnd: Date(timeIntervalSince1970: 1_780_000_000),
             subscriptionStatus: "active",
@@ -260,15 +366,33 @@ struct CommandCodeUsageFetcherTests {
         #expect(abs((snapshot.monthlyCreditsUsed ?? -1) - 1.2216) < 0.0001)
 
         let usage = snapshot.toUsageSnapshot()
-        let primary = try #require(usage.primary)
-        #expect(abs(primary.usedPercent - 12.216) < 0.001)
-        #expect(primary.resetsAt == Date(timeIntervalSince1970: 1_780_000_000))
+        #expect(usage.primary?.usedPercent == 25)
+        #expect(usage.secondary?.usedPercent == 10)
+        let monthly = try #require(usage.tertiary)
+        #expect(abs(monthly.usedPercent - 12.216) < 0.001)
+        #expect(monthly.windowMinutes == ProviderPaceCapability.monthlyWindowSentinelMinutes)
+        #expect(monthly.resetsAt == Date(timeIntervalSince1970: 1_780_000_000))
         #expect(usage.identity?.loginMethod == "Go · $1.22 of $10.00")
+    }
+
+    @Test
+    func `free tier with no allowance has no usage window`() {
+        let snapshot = CommandCodeUsageSnapshot(
+            monthlyCreditsRemaining: 0,
+            purchasedCredits: 0,
+            premiumMonthlyCredits: 0,
+            opensourceMonthlyCredits: 0,
+            plan: nil,
+            billingPeriodEnd: nil,
+            subscriptionStatus: nil)
+
+        #expect(snapshot.toUsageSnapshot().tertiary == nil)
     }
 
     @Test
     func `plan catalog covers known plans`() {
         #expect(CommandCodePlanCatalog.plan(forID: "individual-go")?.monthlyCreditsUSD == 10)
+        #expect(CommandCodePlanCatalog.plan(forID: "individual-goat")?.monthlyCreditsUSD == 70)
         #expect(CommandCodePlanCatalog.plan(forID: "individual-pro")?.monthlyCreditsUSD == 30)
         #expect(CommandCodePlanCatalog.plan(forID: "individual-max")?.monthlyCreditsUSD == 150)
         #expect(CommandCodePlanCatalog.plan(forID: "individual-ultra")?.monthlyCreditsUSD == 300)
@@ -282,6 +406,15 @@ struct CommandCodeUsageFetcherTests {
         #expect(override.name == "__Secure-better-auth.session_token")
         #expect(override.token == "abc123")
         #expect(override.headerValue == "__Secure-better-auth.session_token=abc123")
+    }
+
+    @Test
+    func `cookie header extracts renamed commandcode session cookie`() throws {
+        let raw = "_ga=GA1.2.123; __Secure-commandcode_prod_.session_token=abc123; foo=bar"
+        let override = try #require(CommandCodeCookieHeader.override(from: raw))
+        #expect(override.name == "__Secure-commandcode_prod_.session_token")
+        #expect(override.token == "abc123")
+        #expect(override.headerValue == "__Secure-commandcode_prod_.session_token=abc123")
     }
 
     @Test

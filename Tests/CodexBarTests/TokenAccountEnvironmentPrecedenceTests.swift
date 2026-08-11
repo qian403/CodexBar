@@ -5,6 +5,141 @@ import Testing
 @testable import CodexBarCLI
 
 @Suite(.serialized)
+struct AlibabaTokenPlanRegionSelectionTests {
+    @Test @MainActor
+    func `fresh app settings default to International`() {
+        let settings = testSettingsStore(suiteName: "AlibabaTokenPlanRegionSelectionTests-fresh")
+
+        #expect(settings.alibabaTokenPlanAPIRegion == .international)
+    }
+
+    @Test @MainActor
+    func `legacy app settings without region remain China mainland`() {
+        var config = CodexBarConfig.makeDefault()
+        config.setProviderConfig(ProviderConfig(id: .alibabatokenplan, region: nil))
+        let settings = testSettingsStore(
+            suiteName: "AlibabaTokenPlanRegionSelectionTests-legacy",
+            config: config)
+
+        #expect(settings.alibabaTokenPlanAPIRegion == .chinaMainland)
+    }
+
+    @Test @MainActor
+    func `app settings trim configured region`() {
+        var config = CodexBarConfig.makeDefault()
+        config.setProviderConfig(ProviderConfig(id: .alibabatokenplan, region: " intl "))
+        let settings = testSettingsStore(
+            suiteName: "AlibabaTokenPlanRegionSelectionTests-trimmed",
+            config: config)
+
+        #expect(settings.alibabaTokenPlanAPIRegion == .international)
+    }
+
+    @Test
+    func `CLI honors explicit region and keeps legacy config on China mainland`() throws {
+        let selection = TokenAccountCLISelection(label: nil, index: nil, allAccounts: false)
+        let internationalContext = try TokenAccountCLIContext(
+            selection: selection,
+            config: CodexBarConfig(providers: [
+                ProviderConfig(id: .alibabatokenplan, region: AlibabaTokenPlanAPIRegion.international.rawValue),
+            ]),
+            verbose: false)
+        let legacyContext = try TokenAccountCLIContext(
+            selection: selection,
+            config: CodexBarConfig(providers: [
+                ProviderConfig(id: .alibabatokenplan, region: nil),
+            ]),
+            verbose: false)
+
+        #expect(internationalContext.settingsSnapshot(for: .alibabatokenplan, account: nil)?
+            .alibabaTokenPlan?.apiRegion == .international)
+        #expect(legacyContext.settingsSnapshot(for: .alibabatokenplan, account: nil)?
+            .alibabaTokenPlan?.apiRegion == .chinaMainland)
+    }
+}
+
+@Suite(.serialized)
+struct ZaiTokenAccountEnvironmentPrecedenceTests {
+    @Test
+    func `zai CLI settings snapshot defaults to personal without account scope`() throws {
+        let config = CodexBarConfig(providers: [
+            ProviderConfig(id: .zai),
+        ])
+        let selection = TokenAccountCLISelection(label: nil, index: nil, allAccounts: false)
+        let tokenContext = try TokenAccountCLIContext(
+            selection: selection,
+            config: config,
+            verbose: false,
+            baseEnvironment: [
+                ZaiSettingsReader.bigModelOrganizationKey: " org-env ",
+                ZaiSettingsReader.bigModelProjectKey: " proj-env ",
+            ])
+
+        let snapshot = try #require(tokenContext.settingsSnapshot(for: .zai, account: nil)?.zai)
+
+        #expect(snapshot.usageScope == .personal)
+        #expect(snapshot.teamContext == nil)
+    }
+
+    @Test
+    func `zai CLI settings snapshot uses selected team account scope`() throws {
+        let account = ProviderTokenAccount(
+            id: UUID(),
+            label: "Team",
+            token: "account-token",
+            addedAt: 0,
+            lastUsed: nil,
+            usageScope: " team ",
+            organizationID: " org-account ",
+            workspaceID: " proj-account ")
+        let config = CodexBarConfig(providers: [
+            ProviderConfig(id: .zai),
+        ])
+        let tokenContext = try TokenAccountCLIContext(
+            selection: TokenAccountCLISelection(label: nil, index: nil, allAccounts: false),
+            config: config,
+            verbose: false,
+            baseEnvironment: [
+                ZaiSettingsReader.bigModelOrganizationKey: "org-env",
+                ZaiSettingsReader.bigModelProjectKey: "proj-env",
+            ])
+
+        let snapshot = try #require(tokenContext.settingsSnapshot(for: .zai, account: account)?.zai)
+
+        #expect(snapshot.usageScope == .team)
+        #expect(snapshot.teamContext?.organizationID == "org-account")
+        #expect(snapshot.teamContext?.projectID == "proj-account")
+    }
+
+    @Test
+    func `zai CLI personal account scope clears inherited team context`() throws {
+        let account = ProviderTokenAccount(
+            id: UUID(),
+            label: "Personal",
+            token: "account-token",
+            addedAt: 0,
+            lastUsed: nil,
+            usageScope: "personal")
+        let config = CodexBarConfig(providers: [
+            ProviderConfig(id: .zai),
+        ])
+        let tokenContext = try TokenAccountCLIContext(
+            selection: TokenAccountCLISelection(label: nil, index: nil, allAccounts: false),
+            config: config,
+            verbose: false,
+            baseEnvironment: [
+                ZaiSettingsReader.bigModelOrganizationKey: "org-env",
+                ZaiSettingsReader.bigModelProjectKey: "proj-env",
+            ])
+
+        let snapshot = try #require(tokenContext.settingsSnapshot(for: .zai, account: account)?.zai)
+
+        #expect(snapshot.usageScope == .personal)
+        #expect(snapshot.teamContext == nil)
+    }
+}
+
+@Suite(.serialized)
 @MainActor
 struct TokenAccountEnvironmentPrecedenceTests {
     @Test
@@ -105,6 +240,23 @@ struct TokenAccountEnvironmentPrecedenceTests {
 
         #expect(ollamaSettings.cookieSource == .manual)
         #expect(ollamaSettings.manualCookieHeader == "session=account-token")
+    }
+
+    @Test
+    func `command code config cookie is carried into CLI settings snapshot`() throws {
+        let config = CodexBarConfig(providers: [
+            ProviderConfig(
+                id: .commandcode,
+                cookieHeader: "better-auth.session_token=manual-token",
+                cookieSource: .manual),
+        ])
+        let selection = TokenAccountCLISelection(label: nil, index: nil, allAccounts: false)
+        let tokenContext = try TokenAccountCLIContext(selection: selection, config: config, verbose: false)
+        let snapshot = try #require(tokenContext.settingsSnapshot(for: .commandcode, account: nil))
+        let commandCodeSettings = try #require(snapshot.commandcode)
+
+        #expect(commandCodeSettings.cookieSource == .manual)
+        #expect(commandCodeSettings.manualCookieHeader == "better-auth.session_token=manual-token")
     }
 
     @Test
@@ -437,15 +589,21 @@ struct TokenAccountEnvironmentPrecedenceTests {
     }
 
     @Test
-    func `codex all accounts selection exposes visible managed accounts and scopes CLI homes`() throws {
+    func `codex all accounts selection exposes configured accounts and scopes CLI homes`() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("codex-cli-all-accounts-\(UUID().uuidString)", isDirectory: true)
         let ambientHome = root.appendingPathComponent("ambient", isDirectory: true)
         let firstHome = root.appendingPathComponent("first", isDirectory: true)
         let secondHome = root.appendingPathComponent("second", isDirectory: true)
+        let profileHome = root.appendingPathComponent("profile", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: ambientHome, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: firstHome, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: secondHome, withIntermediateDirectories: true)
+        try Self.writeCodexAuthFile(
+            homeURL: profileHome,
+            email: "profile@example.com",
+            accountID: "acct_profile")
         let storeURL = root.appendingPathComponent("managed-codex-accounts.json")
         let firstID = UUID()
         let secondID = UUID()
@@ -468,9 +626,10 @@ struct TokenAccountEnvironmentPrecedenceTests {
                 lastAuthenticatedAt: nil),
         ])
         try FileManagedCodexAccountStore(fileURL: storeURL).storeAccounts(accounts)
-        let config = CodexBarConfig(providers: [
-            ProviderConfig(id: .codex, codexActiveSource: .managedAccount(id: secondID)),
-        ])
+        var providerConfig = ProviderConfig(id: .codex)
+        providerConfig.codexActiveSource = .managedAccount(id: secondID)
+        providerConfig.codexProfileHomePaths = [profileHome.path]
+        let config = CodexBarConfig(providers: [providerConfig])
         let context = try TokenAccountCLIContext(
             selection: TokenAccountCLISelection(label: nil, index: nil, allAccounts: true),
             config: config,
@@ -481,10 +640,12 @@ struct TokenAccountEnvironmentPrecedenceTests {
         let projection = context.visibleCodexAccounts()
         #expect(projection.visibleAccounts.map(\.menuDisplayName) == [
             "first@example.com — Team",
+            "profile@example.com",
             "second@example.com",
         ])
         #expect(projection.visibleAccounts.map(\.selectionSource) == [
             .managedAccount(id: firstID),
+            .profileHome(path: profileHome.path),
             .managedAccount(id: secondID),
         ])
         #expect(projection.visibleAccounts.first { $0.email == "second@example.com" }?.isActive == true)
@@ -495,6 +656,18 @@ struct TokenAccountEnvironmentPrecedenceTests {
             account: nil,
             codexActiveSourceOverride: .managedAccount(id: firstID))
         #expect(firstEnv["CODEX_HOME"] == firstHome.path)
+
+        let profileEnv = context.environment(
+            base: ["CODEX_HOME": ambientHome.path],
+            provider: .codex,
+            account: nil,
+            codexActiveSourceOverride: .profileHome(path: profileHome.path))
+        #expect(profileEnv["CODEX_HOME"] == profileHome.path)
+        #expect(context.settingsSnapshot(
+            for: .codex,
+            account: nil,
+            codexActiveSourceOverride: .profileHome(path: profileHome.path))?.codex?.openAIWebCacheScope
+            == .profileHome(profileHome.path))
 
         let liveEnv = context.environment(
             base: ["CODEX_HOME": ambientHome.path],
@@ -519,6 +692,36 @@ struct TokenAccountEnvironmentPrecedenceTests {
         let identity = try #require(labeled.identity(for: .codex))
         #expect(identity.accountEmail == "first@example.com")
         #expect(identity.accountOrganization == "Team")
+    }
+
+    @Test
+    func `codex CLI ignores relative profile homes`() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-cli-relative-profile-\(UUID().uuidString)", isDirectory: true)
+        let ambientHome = root.appendingPathComponent("ambient", isDirectory: true)
+        let managedStoreURL = root.appendingPathComponent("managed-codex-accounts.json")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: ambientHome, withIntermediateDirectories: true)
+
+        var providerConfig = ProviderConfig(id: .codex)
+        providerConfig.codexActiveSource = .profileHome(path: "relative-codex-home")
+        providerConfig.codexProfileHomePaths = ["relative-codex-home"]
+        let config = CodexBarConfig(providers: [providerConfig])
+        let context = try TokenAccountCLIContext(
+            selection: TokenAccountCLISelection(label: nil, index: nil, allAccounts: false),
+            config: config,
+            verbose: false,
+            baseEnvironment: ["CODEX_HOME": ambientHome.path],
+            managedCodexAccountStoreURL: managedStoreURL)
+
+        let environment = context.environment(
+            base: ["CODEX_HOME": ambientHome.path],
+            provider: .codex,
+            account: nil,
+            codexActiveSourceOverride: .profileHome(path: "relative-codex-home"))
+
+        #expect(context.visibleCodexAccounts().visibleAccounts.isEmpty)
+        #expect(environment["CODEX_HOME"] == ambientHome.path)
     }
 
     @Test
@@ -563,7 +766,7 @@ struct TokenAccountEnvironmentPrecedenceTests {
         let snapshot = try #require(tokenContext.settingsSnapshot(for: .claude, account: account))
         let claudeSettings = try #require(snapshot.claude)
 
-        #expect(claudeSettings.usageDataSource == .auto)
+        #expect(claudeSettings.usageDataSource == .web)
         #expect(claudeSettings.cookieSource == .manual)
         #expect(claudeSettings.manualCookieHeader == "sessionKey=sk-ant-session-token")
     }
@@ -657,10 +860,10 @@ struct TokenAccountEnvironmentPrecedenceTests {
     }
 
     @Test
-    func `apply account label in app preserves snapshot fields`() {
+    func `apply account label in app preserves snapshot fields`() throws {
         let settings = Self.makeSettingsStore(suite: "TokenAccountEnvironmentPrecedenceTests-apply-app")
         let store = Self.makeUsageStore(settings: settings)
-        let snapshot = Self.makeSnapshotWithAllFields(provider: .zai)
+        let snapshot = try Self.makeSnapshotWithAllFields(provider: .zai)
         let account = ProviderTokenAccount(
             id: UUID(),
             label: "Team Account",
@@ -681,7 +884,7 @@ struct TokenAccountEnvironmentPrecedenceTests {
             selection: TokenAccountCLISelection(label: nil, index: nil, allAccounts: false),
             config: CodexBarConfig(providers: []),
             verbose: false)
-        let snapshot = Self.makeSnapshotWithAllFields(provider: .zai)
+        let snapshot = try Self.makeSnapshotWithAllFields(provider: .zai)
         let account = ProviderTokenAccount(
             id: UUID(),
             label: "CLI Account",
@@ -846,7 +1049,6 @@ extension TokenAccountEnvironmentPrecedenceTests {
             minimaxCookieStore: InMemoryMiniMaxCookieStore(),
             minimaxAPITokenStore: InMemoryMiniMaxAPITokenStore(),
             kimiTokenStore: InMemoryKimiTokenStore(),
-            kimiK2TokenStore: InMemoryKimiK2TokenStore(),
             augmentCookieStore: InMemoryCookieHeaderStore(),
             ampCookieStore: InMemoryCookieHeaderStore(),
             copilotTokenStore: InMemoryCopilotTokenStore(),
@@ -880,6 +1082,20 @@ extension TokenAccountEnvironmentPrecedenceTests {
             return nil
         }
         return environment["CODEX_HOME"]
+    }
+
+    fileprivate static func writeCodexAuthFile(homeURL: URL, email: String, accountID: String) throws {
+        try FileManager.default.createDirectory(at: homeURL, withIntermediateDirectories: true)
+        let auth: [String: Any] = [
+            "tokens": [
+                "accessToken": "access-token",
+                "refreshToken": "refresh-token",
+                "idToken": self.fakeJWT(email: email, plan: "pro", accountId: accountID),
+                "account_id": accountID,
+            ],
+        ]
+        let data = try JSONSerialization.data(withJSONObject: auth)
+        try data.write(to: homeURL.appendingPathComponent("auth.json"))
     }
 
     fileprivate static func knownOwnerMultiset(
@@ -944,26 +1160,16 @@ extension TokenAccountEnvironmentPrecedenceTests {
         return try operation(managedStoreURL)
     }
 
-    fileprivate static func makeSnapshotWithAllFields(provider: UsageProvider) -> UsageSnapshot {
+    fileprivate static func makeSnapshotWithAllFields(provider: UsageProvider) throws -> UsageSnapshot {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let reset = Date(timeIntervalSince1970: 1_700_003_600)
-        let tokenLimit = ZaiLimitEntry(
-            type: .tokensLimit,
-            unit: .hours,
-            number: 6,
-            usage: 200,
-            currentValue: 40,
-            remaining: 160,
-            percentage: 20,
-            usageDetails: [ZaiUsageDetail(modelCode: "glm-4", usage: 40)],
-            nextResetTime: reset)
         let identity = ProviderIdentitySnapshot(
-            providerID: provider,
+            providerID: provider.instanceID,
             accountEmail: nil,
             accountOrganization: "Org",
             loginMethod: "Pro")
 
-        return UsageSnapshot(
+        return try UsageSnapshot(
             primary: RateWindow(usedPercent: 21, windowMinutes: 60, resetsAt: reset, resetDescription: "primary"),
             secondary: RateWindow(usedPercent: 42, windowMinutes: 1440, resetsAt: nil, resetDescription: "secondary"),
             tertiary: RateWindow(usedPercent: 7, windowMinutes: nil, resetsAt: nil, resetDescription: "tertiary"),
@@ -974,28 +1180,10 @@ extension TokenAccountEnvironmentPrecedenceTests {
                 period: "Monthly",
                 resetsAt: reset,
                 updatedAt: now),
-            zaiUsage: ZaiUsageSnapshot(
-                tokenLimit: tokenLimit,
-                timeLimit: nil,
-                planName: "Z.ai Pro",
-                updatedAt: now),
-            minimaxUsage: MiniMaxUsageSnapshot(
-                planName: "MiniMax",
-                availablePrompts: 500,
-                currentPrompts: 120,
-                remainingPrompts: 380,
-                windowMinutes: 1440,
-                usedPercent: 24,
-                resetsAt: reset,
-                updatedAt: now),
-            openRouterUsage: OpenRouterUsageSnapshot(
-                totalCredits: 50,
-                totalUsage: 10,
-                balance: 40,
-                usedPercent: 20,
-                rateLimit: nil,
-                updatedAt: now),
-            cursorRequests: CursorRequestUsage(used: 7, limit: 70),
+            details: [ProviderDetailSection(rows: [
+                ProviderDetailSection.Row(label: "Remaining", value: "$40.00"),
+                ProviderDetailSection.Row(label: "Request quota", value: "7 / 70"),
+            ])],
             subscriptionExpiresAt: reset.addingTimeInterval(86400),
             subscriptionRenewsAt: reset.addingTimeInterval(43200),
             updatedAt: now,
@@ -1009,14 +1197,7 @@ extension TokenAccountEnvironmentPrecedenceTests {
         #expect(after.providerCost?.used == before.providerCost?.used)
         #expect(after.providerCost?.limit == before.providerCost?.limit)
         #expect(after.providerCost?.currencyCode == before.providerCost?.currencyCode)
-        #expect(after.zaiUsage?.planName == before.zaiUsage?.planName)
-        #expect(after.zaiUsage?.tokenLimit?.usage == before.zaiUsage?.tokenLimit?.usage)
-        #expect(after.minimaxUsage?.planName == before.minimaxUsage?.planName)
-        #expect(after.minimaxUsage?.availablePrompts == before.minimaxUsage?.availablePrompts)
-        #expect(after.openRouterUsage?.balance == before.openRouterUsage?.balance)
-        #expect(after.openRouterUsage?.rateLimit?.requests == before.openRouterUsage?.rateLimit?.requests)
-        #expect(after.cursorRequests?.used == before.cursorRequests?.used)
-        #expect(after.cursorRequests?.limit == before.cursorRequests?.limit)
+        #expect(after.details == before.details)
         #expect(after.subscriptionExpiresAt == before.subscriptionExpiresAt)
         #expect(after.subscriptionRenewsAt == before.subscriptionRenewsAt)
         #expect(after.updatedAt == before.updatedAt)
