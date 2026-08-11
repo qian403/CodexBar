@@ -1608,13 +1608,13 @@ struct ProviderArchitectureGatekeeperTests {
             reason: "Antigravity model identifiers use this token to classify a model family."),
         SuppressedProviderReference(
             path: "Sources/CodexBarCore/Providers/AzureOpenAI/AzureOpenAIUsageFetcher.swift",
-            line: 171,
+            line: 172,
             anchor: "let base = self.apiRoot(endpoint: endpoint, pathComponents: [\"openai\", \"v1\"])",
             expectedProviderIDs: ["openai"],
             reason: "Azure OpenAI's v1 REST route requires this fixed service path component."),
         SuppressedProviderReference(
             path: "Sources/CodexBarCore/Providers/AzureOpenAI/AzureOpenAIUsageFetcher.swift",
-            line: 180,
+            line: 181,
             anchor: "let base = self.apiRoot(endpoint: endpoint, pathComponents: [\"openai\"])",
             expectedProviderIDs: ["openai"],
             reason: "Azure OpenAI's deployment REST route requires this fixed service path component."),
